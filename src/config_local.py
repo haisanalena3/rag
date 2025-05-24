@@ -13,10 +13,10 @@ def load_config_local():
         "LOCAL_MODEL": {
             "base_url": "https://api-ai.thangnotes.dev/",
             "model": "gemma3:1b-it-qat",  # Có thể thay bằng gemma3:1b hoặc gemma3:8b
-            "max_tokens": 2000,
+            "max_tokens": 1000,
             "temperature": 0.4,
             "top_p": 0.4,
-            "timeout": 220
+            "timeout": 90
         },
         # Backup Gemini API (optional)
         "GEMINI_API_KEY": "your_backup_gemini_key_here",
