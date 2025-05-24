@@ -482,20 +482,7 @@ Hãy tham khảo cả thông tin văn bản và hình ảnh để đưa ra câu 
 
 def create_general_knowledge_context(question):
     """Tạo context cho kiến thức chung"""
-    return f"""
-Bạn là một trợ lý AI thông minh và hữu ích được custom bởi K-TOOL. Người dùng đã hỏi một câu hỏi nhưng không có thông tin liên quan trong database.
-Hãy trả lời câu hỏi dựa trên kiến thức chung của bạn một cách chi tiết và hữu ích.
-
-Câu hỏi: {question}
-
-Hãy trả lời một cách:
-1. Chi tiết và có cấu trúc
-2. Dễ hiểu và thực tế
-3. Cung cấp thông tin hữu ích
-4. Nếu không biết chắc chắn, hãy nói rõ điều đó
-5. Sử dụng markdown để format câu trả lời đẹp mắt
-
-Trả lời bằng tiếng Việt và đảm bảo nội dung chính xác, có giá trị."""
+    return f"""{question}"""
 
 def parse_answer_with_image_markers(answer, relevant_images):
     """Phân tích câu trả lời và tách các marker ảnh"""

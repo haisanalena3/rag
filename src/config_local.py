@@ -11,7 +11,7 @@ def load_config_local():
         # Cấu hình cho Local Gemma
         "USE_LOCAL_MODEL": True,
         "LOCAL_MODEL": {
-            "base_url": "https://api-ai.thangnotes.dev/",
+            "base_url": "http://host.docker.internal:11434",
             "model": "gemma3:1b-it-qat",  # Có thể thay bằng gemma3:1b hoặc gemma3:8b
             "max_tokens": 1000,
             "temperature": 0.4,
