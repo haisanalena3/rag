@@ -701,7 +701,7 @@ def main():
 
     # Khởi tạo session state
     if 'rag_system' not in st.session_state:
-        st.session_state.rag_system = EnhancedMultimodalRAGLocal("db")
+        st.session_state.rag_system = EnhancedMultimodalRAGLocal("../db")
     
     if 'chat_history' not in st.session_state:
         st.session_state.chat_history = []
