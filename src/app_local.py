@@ -482,7 +482,7 @@ Hãy tham khảo cả thông tin văn bản và hình ảnh để đưa ra câu 
 
 def create_general_knowledge_context(question):
     """Tạo context cho kiến thức chung"""
-    return f"""{question}"""
+    return f"""Hãy trả lời ngắn gọn ít tốn token nhất với Câu hỏi: {question}"""
 
 def parse_answer_with_image_markers(answer, relevant_images):
     """Phân tích câu trả lời và tách các marker ảnh"""

@@ -16,7 +16,7 @@ def load_config_local():
             "max_tokens": 1000,
             "temperature": 0.4,
             "top_p": 0.4,
-            "timeout": 90
+            "timeout": 120
         },
         # Backup Gemini API (optional)
         "GEMINI_API_KEY": "your_backup_gemini_key_here",
