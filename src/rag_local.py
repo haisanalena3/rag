@@ -5,22 +5,26 @@ import re
 from collections import Counter
 from local_gemma import LocalGemmaClient
 import logging
+import time
+import json
 
 logger = logging.getLogger(__name__)
 
 def advanced_preprocess_text(text):
-    """Tiền xử lý văn bản nâng cao"""
+    """Tiền xử lý văn bản nâng cao với xử lý tiếng Việt tốt hơn"""
     if not text:
         return ""
     
     text = text.lower()
-    # Giữ lại các ký tự tiếng Việt
+    # Giữ lại các ký tự tiếng Việt và loại bỏ ký tự đặc biệt
     text = re.sub(r'[^\w\s\-\.\àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]', ' ', text)
-    text = ' '.join(text.split())
-    return text
+    # Loại bỏ số đơn lẻ và ký tự đặc biệt
+    text = re.sub(r'\b\d+\b', ' ', text)
+    text = re.sub(r'\s+', ' ', text)
+    return text.strip()
 
-def extract_key_phrases(text, max_phrases=10):
-    """Trích xuất cụm từ quan trọng"""
+def extract_key_phrases(text, max_phrases=15):
+    """Trích xuất cụm từ quan trọng với cải tiến"""
     if not text:
         return []
     
@@ -28,14 +32,22 @@ def extract_key_phrases(text, max_phrases=10):
     if len(words) < 2:
         return words
     
+    # Tạo n-grams
     bigrams = [' '.join(words[i:i+2]) for i in range(len(words)-1)]
     trigrams = [' '.join(words[i:i+3]) for i in range(len(words)-2)]
     
-    phrase_counts = Counter(bigrams + trigrams)
+    # Lọc các phrase có ý nghĩa
+    meaningful_phrases = []
+    for phrase in bigrams + trigrams:
+        # Loại bỏ phrase chỉ chứa stop words hoặc quá ngắn
+        if len(phrase) > 4 and not re.match(r'^(và|của|cho|với|từ|tại|trong|trên|dưới|về|là|có|được|đã|sẽ|này|đó|khi|nếu|như|để|theo|sau|trước|giữa|ngoài|bên|qua|lên|xuống)\s', phrase):
+            meaningful_phrases.append(phrase)
+    
+    phrase_counts = Counter(meaningful_phrases)
     return [phrase for phrase, count in phrase_counts.most_common(max_phrases)]
 
 def calculate_semantic_similarity(query_words, doc_words):
-    """Tính toán độ tương tự ngữ nghĩa"""
+    """Tính toán độ tương tự ngữ nghĩa với cải tiến"""
     if not query_words or not doc_words:
         return 0
     
@@ -44,42 +56,63 @@ def calculate_semantic_similarity(query_words, doc_words):
     union = len(query_words.union(doc_words))
     jaccard = intersection / union if union > 0 else 0
     
-    # Coverage similarity
+    # Coverage similarity (bao phủ query)
     coverage = intersection / len(query_words) if len(query_words) > 0 else 0
     
-    # Weighted combination
-    return (jaccard * 0.6) + (coverage * 0.4)
+    # Precision similarity (độ chính xác)
+    precision = intersection / len(doc_words) if len(doc_words) > 0 else 0
+    
+    # Weighted combination với trọng số cải tiến
+    return (jaccard * 0.4) + (coverage * 0.4) + (precision * 0.2)
 
-def enhanced_search_documents(query, documents, threshold=0.2, top_k=3):
-    """Tìm kiếm documents nâng cao với nhiều phương pháp"""
+def enhanced_search_documents(query, documents, threshold=0.05, top_k=3):
+    """Tìm kiếm documents nâng cao với threshold rất thấp"""
     if not documents or not query:
         return [], 0
-    
+
     try:
+        # Nếu documents là string, chuyển thành list
+        if isinstance(documents, str):
+            documents = [documents]
+
         processed_query = advanced_preprocess_text(query)
-        processed_docs = [advanced_preprocess_text(doc) for doc in documents]
+        
+        # Xử lý documents - hỗ trợ cả string và dict
+        processed_docs = []
+        doc_objects = []
+        
+        for doc in documents:
+            if isinstance(doc, dict):
+                # Document object với metadata
+                text_content = f"{doc.get('title', '')} {doc.get('description', '')} {doc.get('text_content', '')}"
+                processed_docs.append(advanced_preprocess_text(text_content))
+                doc_objects.append(doc)
+            elif isinstance(doc, str):
+                # Plain text document
+                processed_docs.append(advanced_preprocess_text(doc))
+                doc_objects.append({'text_content': doc, 'title': 'Document', 'description': '', 'metadata': {}})
         
         # Lọc documents hợp lệ
         valid_docs = [(i, doc) for i, doc in enumerate(processed_docs) if doc.strip()]
-        
         if not valid_docs:
             return [], 0
         
         valid_indices, valid_texts = zip(*valid_docs)
         
-        # Phương pháp 1: TF-IDF với n-grams
+        # TF-IDF với n-grams cải tiến
         try:
             vectorizer = TfidfVectorizer(
-                max_features=10000,
-                ngram_range=(1, 3),
+                max_features=5000,  # Giảm features để tăng tốc
+                ngram_range=(1, 2),  # Giảm ngram range
                 stop_words=None,
                 min_df=1,
-                max_df=0.95
+                max_df=0.95,
+                sublinear_tf=True,
+                use_idf=True
             )
             
             all_texts = list(valid_texts) + [processed_query]
             tfidf_matrix = vectorizer.fit_transform(all_texts)
-            
             query_vector = tfidf_matrix[-1]
             doc_vectors = tfidf_matrix[:-1]
             
@@ -88,7 +121,7 @@ def enhanced_search_documents(query, documents, threshold=0.2, top_k=3):
             logger.warning(f"TF-IDF failed: {e}, using simple similarity")
             tfidf_similarities = np.zeros(len(valid_texts))
         
-        # Phương pháp 2: Keyword matching với trọng số
+        # Keyword matching với trọng số cải tiến
         query_words = set(processed_query.split())
         keyword_scores = []
         
@@ -99,40 +132,38 @@ def enhanced_search_documents(query, documents, threshold=0.2, top_k=3):
         
         keyword_scores = np.array(keyword_scores)
         
-        # Phương pháp 3: Phrase matching
-        query_phrases = extract_key_phrases(processed_query, 5)
-        phrase_scores = []
-        
+        # Exact match bonus - quan trọng nhất
+        exact_match_scores = []
         for doc_text in valid_texts:
-            doc_phrases = extract_key_phrases(doc_text, 20)
-            
-            phrase_matches = 0
-            for q_phrase in query_phrases:
-                if any(q_phrase in d_phrase or d_phrase in q_phrase for d_phrase in doc_phrases):
-                    phrase_matches += 1
-            
-            phrase_score = phrase_matches / len(query_phrases) if len(query_phrases) > 0 else 0
-            phrase_scores.append(phrase_score)
+            exact_matches = 0
+            for word in query_words:
+                if len(word) > 2 and word in doc_text:  # Giảm min length
+                    exact_matches += 1
+            exact_score = exact_matches / len(query_words) if len(query_words) > 0 else 0
+            exact_match_scores.append(exact_score)
         
-        phrase_scores = np.array(phrase_scores)
+        exact_match_scores = np.array(exact_match_scores)
         
-        # Kết hợp các điểm số với trọng số
+        # Kết hợp các điểm số với trọng số tối ưu - ưu tiên exact match
         final_scores = (
-            tfidf_similarities * 0.5 +
+            tfidf_similarities * 0.3 +
             keyword_scores * 0.3 +
-            phrase_scores * 0.2
+            exact_match_scores * 0.4  # Tăng trọng số exact match
         )
         
         max_similarity = np.max(final_scores) if len(final_scores) > 0 else 0
         
+        # Sử dụng threshold rất thấp
+        adjusted_threshold = max(0.01, threshold)
+        
         # Lọc theo threshold
         results = []
-        if max_similarity >= threshold:
+        if max_similarity >= adjusted_threshold:
             sorted_indices = np.argsort(final_scores)[::-1]
             for idx in sorted_indices[:top_k]:
-                if final_scores[idx] >= threshold:
+                if final_scores[idx] >= adjusted_threshold:
                     original_idx = valid_indices[idx]
-                    results.append(documents[original_idx])
+                    results.append(doc_objects[original_idx])
         
         return results, max_similarity
         
@@ -140,33 +171,102 @@ def enhanced_search_documents(query, documents, threshold=0.2, top_k=3):
         logger.error(f"Lỗi trong enhanced_search_documents: {e}")
         return [], 0
 
-def search_documents_with_threshold(query, documents, threshold=0.2, top_k=3):
-    """Wrapper function cho enhanced search"""
+def enhanced_search_with_metadata(query, documents, threshold=0.05, top_k=3):
+    """Tìm kiếm nâng cao có xét đến metadata với threshold thấp"""
+    if not documents or not query:
+        return [], 0
+
+    processed_query = advanced_preprocess_text(query)
+    scored_docs = []
+
+    for doc in documents:
+        # Tính điểm cho text content
+        text_content = f"{doc.get('title', '')}\n{doc.get('description', '')}\n{doc.get('text_content', '')}"
+        processed_text = advanced_preprocess_text(text_content)
+        
+        # Tính điểm cho headings (trọng số cao hơn)
+        headings_text = " ".join(doc.get('metadata', {}).get('headings', []))
+        processed_headings = advanced_preprocess_text(headings_text)
+        
+        # Tính điểm tổng hợp
+        content_score = calculate_semantic_similarity(
+            set(processed_query.split()),
+            set(processed_text.split())
+        )
+        
+        heading_score = calculate_semantic_similarity(
+            set(processed_query.split()),
+            set(processed_headings.split())
+        )
+        
+        # Bonus cho title match - quan trọng
+        title_score = 0
+        if doc.get('title'):
+            title_words = set(advanced_preprocess_text(doc['title']).split())
+            query_words = set(processed_query.split())
+            title_score = calculate_semantic_similarity(query_words, title_words) * 0.3
+        
+        # Exact word match bonus
+        exact_bonus = 0
+        query_words = processed_query.split()
+        for word in query_words:
+            if len(word) > 2 and word in processed_text:
+                exact_bonus += 0.1
+        
+        # Tính điểm cuối với trọng số cải tiến
+        final_score = (
+            content_score * 0.4 +
+            heading_score * 0.2 +
+            title_score +
+            exact_bonus
+        )
+        
+        # Sử dụng threshold rất thấp
+        if final_score >= 0.01:  # Threshold cực thấp
+            scored_docs.append((doc, final_score))
+    
+    # Sắp xếp theo điểm
+    scored_docs.sort(key=lambda x: x[1], reverse=True)
+    relevant_docs = [doc for doc, score in scored_docs[:top_k]]
+    max_similarity = scored_docs[0][1] if scored_docs else 0
+    
+    return relevant_docs, max_similarity
+
+def search_documents_with_threshold(query, documents, threshold=0.05, top_k=3):
+    """Wrapper function cho enhanced search với threshold thấp"""
     return enhanced_search_documents(query, documents, threshold, top_k)
 
-def adaptive_threshold_search(query, documents, base_threshold=0.2):
-    """Tìm kiếm với threshold thích ứng"""
+def adaptive_threshold_search(query, documents, base_threshold=0.05):
+    """Tìm kiếm với threshold thích ứng cải tiến"""
     if not query or not documents:
         return [], 0
-    
+
     query_complexity = len(query.split())
+    query_lower = query.lower()
     
-    # Điều chỉnh threshold dựa trên độ phức tạp
+    # Điều chỉnh threshold dựa trên độ phức tạp và loại query
     if query_complexity <= 3:
-        threshold = base_threshold + 0.1
-    elif query_complexity <= 7:
         threshold = base_threshold
+    elif query_complexity <= 7:
+        threshold = base_threshold * 0.8
     else:
-        threshold = base_threshold - 0.1
+        threshold = base_threshold * 0.6
     
-    threshold = max(0.1, min(0.8, threshold))
+    # Điều chỉnh cho các loại query đặc biệt
+    if any(keyword in query_lower for keyword in ['là gì', 'what is', 'define', 'định nghĩa']):
+        threshold *= 0.7  # Dễ dàng hơn cho câu hỏi định nghĩa
+    elif any(keyword in query_lower for keyword in ['cách', 'how to', 'làm thế nào']):
+        threshold *= 0.7  # Dễ dàng hơn cho câu hỏi hướng dẫn
+    
+    threshold = max(0.01, min(0.5, threshold))
+    
     return enhanced_search_documents(query, documents, threshold)
 
 def ask_local_model(question, context, config):
-    """Hỏi model local với fallback"""
+    """Hỏi model local với fallback và retry logic"""
     if not config.get("USE_LOCAL_MODEL", False):
         return "Model local không được kích hoạt trong cấu hình."
-    
+
     try:
         local_client = LocalGemmaClient(
             base_url=config["LOCAL_MODEL"]["base_url"],
@@ -182,18 +282,34 @@ def ask_local_model(question, context, config):
             available_models = local_client.get_available_models()
             return f"Model {config['LOCAL_MODEL']['model']} không tồn tại. Models có sẵn: {', '.join(available_models)}"
         
-        logger.info("Sử dụng Gemma 3n local")
+        logger.info("Sử dụng Gemma local")
         
-        response = local_client.generate_response(
-            question, 
-            context, 
-            config["LOCAL_MODEL"]["max_tokens"],
-            config["LOCAL_MODEL"]["temperature"],
-            config["LOCAL_MODEL"]["top_p"],
-            config["LOCAL_MODEL"]["timeout"]
-        )
+        # Retry logic
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                response = local_client.generate_response(
+                    question,
+                    context,
+                    config["LOCAL_MODEL"]["max_tokens"],
+                    config["LOCAL_MODEL"]["temperature"],
+                    config["LOCAL_MODEL"]["top_p"],
+                    config["LOCAL_MODEL"]["timeout"]
+                )
+                
+                if response and len(response.strip()) > 10:
+                    return response
+                else:
+                    logger.warning(f"Response quá ngắn hoặc rỗng, thử lại lần {attempt + 1}")
+                    
+            except Exception as e:
+                logger.warning(f"Lỗi lần thử {attempt + 1}: {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(2)
+                else:
+                    raise e
         
-        return response
+        return "Không thể tạo câu trả lời sau nhiều lần thử."
         
     except Exception as e:
         error_msg = f"Lỗi khi sử dụng model local: {e}"
@@ -201,19 +317,23 @@ def ask_local_model(question, context, config):
         return error_msg
 
 def load_documents(file_paths):
-    """Load documents từ danh sách file paths"""
+    """Load documents từ danh sách file paths với xử lý lỗi"""
     documents = []
     for file_path in file_paths:
         try:
             with open(file_path, 'r', encoding='utf-8') as f:
                 content = f.read()
-                documents.append(content)
+                if content.strip():
+                    documents.append(content)
+                else:
+                    logger.warning(f"File rỗng: {file_path}")
+                    documents.append("")
         except Exception as e:
             logger.error(f"Lỗi đọc file {file_path}: {e}")
             documents.append("")
     return documents
 
 def search_documents(query, documents, top_k=3):
-    """Tìm kiếm documents liên quan nhất"""
-    results, _ = enhanced_search_documents(query, documents, threshold=0.1, top_k=top_k)
+    """Tìm kiếm documents liên quan nhất với threshold rất thấp"""
+    results, _ = enhanced_search_documents(query, documents, threshold=0.01, top_k=top_k)
     return results

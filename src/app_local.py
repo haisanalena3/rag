@@ -9,21 +9,28 @@ import traceback
 import numpy as np
 import re
 import logging
-import requests
-from bs4 import BeautifulSoup
-from urllib.parse import urljoin, urlparse
-import hashlib
 import time
-from datetime import datetime
 import shutil
+import requests
+
+# Fix torch classes path issue with Streamlit on Python 3.13
+try:
+    import torch
+    if not hasattr(torch.classes, '__path__'):
+        torch.classes.__path__ = [os.path.join(torch.__path__[0], 'classes')]
+except ImportError:
+    pass
+except Exception as e:
+    print(f"Warning: Could not fix torch.classes path: {e}")
 
 from config_local import load_config_local
 from rag_local import (
     load_documents, search_documents, ask_local_model,
-    search_documents_with_threshold, adaptive_threshold_search
+    search_documents_with_threshold, adaptive_threshold_search,
+    enhanced_search_with_metadata
 )
-from local_gemma import LocalGemmaClient
 from collect_local import WebScraperLocal
+from local_gemma import LocalGemmaClient
 
 # Cấu hình logging
 logging.basicConfig(level=logging.INFO)
@@ -38,7 +45,7 @@ class EnhancedMultimodalRAGLocal:
         self.load_multimodal_data()
 
     def load_multimodal_data(self):
-        """Load dữ liệu đa phương tiện từ database"""
+        """Load dữ liệu đa phương tiện từ database với debug chi tiết"""
         self.documents = []
         logger.info(f"Kiểm tra thư mục db: {self.db_dir.absolute()}")
         
@@ -88,109 +95,124 @@ class EnhancedMultimodalRAGLocal:
         self.has_data = len(self.documents) > 0
         logger.info(f"Tổng cộng: {len(self.documents)} documents")
 
-    def analyze_query_intent(self, query):
-        """Phân tích ý định của câu hỏi"""
-        query_lower = query.lower()
-        
-        intent_keywords = {
-            'visual': ['ảnh', 'hình', 'màu', 'nhìn', 'thấy', 'hiển thị', 'minh họa', 'hình ảnh'],
-            'descriptive': ['mô tả', 'giải thích', 'là gì', 'như thế nào', 'tại sao', 'định nghĩa'],
-            'comparative': ['so sánh', 'khác nhau', 'giống', 'tương tự', 'hơn', 'khác biệt'],
-            'instructional': ['cách', 'làm', 'thực hiện', 'bước', 'hướng dẫn', 'phương pháp'],
-            'factual': ['khi nào', 'ở đâu', 'ai', 'bao nhiêu', 'số lượng', 'thống kê']
+    def get_database_info(self):
+        """Lấy thông tin chi tiết về database"""
+        db_info = {
+            'total_documents': len(self.documents),
+            'total_words': 0,
+            'total_images': 0,
+            'content_types': {},
+            'keywords': set(),
+            'titles': [],
+            'urls': [],
+            'sample_content': []
         }
 
-        intent_scores = {}
-        for intent, keywords in intent_keywords.items():
-            score = sum(1 for keyword in keywords if keyword in query_lower)
-            intent_scores[intent] = score
+        for doc in self.documents:
+            # Thống kê cơ bản
+            word_count = doc['metadata'].get('word_count', 0)
+            db_info['total_words'] += word_count
+            db_info['total_images'] += len(doc['images'])
+            
+            # Content types
+            content_type = doc['metadata'].get('content_type', 'unknown')
+            db_info['content_types'][content_type] = db_info['content_types'].get(content_type, 0) + 1
+            
+            # Titles và URLs
+            db_info['titles'].append(doc['title'])
+            db_info['urls'].append(doc['url'])
+            
+            # Sample content (first 200 chars)
+            if doc['text_content']:
+                sample = doc['text_content'][:200] + "..."
+                db_info['sample_content'].append({
+                    'title': doc['title'],
+                    'sample': sample
+                })
 
-        primary_intent = max(intent_scores, key=intent_scores.get) if intent_scores else 'general'
-        return primary_intent, intent_scores
+        return db_info
 
-    def enhanced_search_multimodal(self, query, threshold=0.2, top_k=3):
-        """Tìm kiếm đa phương tiện nâng cao"""
+    def enhanced_search_multimodal(self, query, threshold=0.05, top_k=3):
+        """Tìm kiếm với threshold thấp hơn để tìm được kết quả"""
         if not self.has_data:
             return [], 0
 
-        primary_intent, intent_scores = self.analyze_query_intent(query)
-
-        text_corpus = []
-        doc_weights = []
-
-        for doc in self.documents:
-            combined_text = f"{doc['title']}\n{doc['description']}\n{doc['text_content']}"
-            
-            image_descriptions = []
-            for img in doc['images']:
-                if img.get('alt'):
-                    image_descriptions.append(img['alt'])
-                if img.get('title'):
-                    image_descriptions.append(img['title'])
-
-            # Điều chỉnh trọng số dựa trên intent
-            if primary_intent == 'visual' and image_descriptions:
-                combined_text += "\n" + "\n".join(image_descriptions) * 2
-                doc_weights.append(1.5)
-            elif primary_intent == 'descriptive':
-                combined_text = doc['description'] + "\n" + combined_text
-                doc_weights.append(1.2)
-            else:
-                combined_text += "\n" + "\n".join(image_descriptions)
-                doc_weights.append(1.0)
-
-            text_corpus.append(combined_text)
-
-        try:
-            relevant_texts, max_similarity = adaptive_threshold_search(
-                query, text_corpus, threshold
+        # Thử với enhanced_search_with_metadata với threshold thấp
+        relevant_docs, max_similarity = enhanced_search_with_metadata(
+            query, self.documents, threshold, top_k
+        )
+        
+        # Nếu không tìm thấy, thử với threshold cực thấp
+        if not relevant_docs and threshold > 0.01:
+            logger.info(f"Không tìm thấy với threshold {threshold}, thử với 0.01")
+            relevant_docs, max_similarity = enhanced_search_with_metadata(
+                query, self.documents, 0.01, top_k
             )
-
-            relevant_docs = []
-            for relevant_text in relevant_texts:
-                for i, text in enumerate(text_corpus):
-                    if text == relevant_text:
-                        doc = self.documents[i].copy()
-                        doc['search_weight'] = doc_weights[i]
-                        relevant_docs.append(doc)
+        
+        # Nếu vẫn không tìm thấy, thử tìm kiếm từng từ
+        if not relevant_docs:
+            logger.info(f"Thử tìm kiếm từng từ trong query: {query}")
+            words = query.split()
+            for word in words:
+                if len(word) > 2:  # Bỏ qua từ quá ngắn
+                    word_results, word_similarity = enhanced_search_with_metadata(
+                        word, self.documents, 0.01, top_k
+                    )
+                    if word_results:
+                        relevant_docs = word_results
+                        max_similarity = word_similarity
+                        logger.info(f"Tìm thấy kết quả với từ: {word}")
                         break
 
-            relevant_docs.sort(key=lambda x: x.get('search_weight', 1.0), reverse=True)
+        # Lưu lịch sử
+        self.query_history.append({
+            'query': query,
+            'similarity': max_similarity,
+            'results_count': len(relevant_docs),
+            'timestamp': time.time(),
+            'threshold_used': threshold
+        })
 
-            # Lưu lịch sử
-            self.query_history.append({
-                'query': query,
-                'intent': primary_intent,
-                'similarity': max_similarity,
-                'results_count': len(relevant_docs)
-            })
-
-            return relevant_docs[:top_k], max_similarity
-
-        except Exception as e:
-            logger.error(f"Lỗi enhanced search: {e}")
-            return [], 0
+        return relevant_docs, max_similarity
 
     def get_relevant_images_for_context(self, relevant_docs, query, max_images=5):
-        """Lấy ảnh liên quan để đưa vào context"""
+        """Lấy ảnh liên quan để đưa vào context với scoring cải tiến"""
         relevant_images = []
-        
+        query_lower = query.lower()
+        query_words = set(query_lower.split())
+
         for doc in relevant_docs:
             for img_info in doc['images']:
                 relevance_score = 0
                 alt_text = img_info.get('alt', '').lower()
                 title_text = img_info.get('title', '').lower()
-                query_lower = query.lower()
 
                 # Tính điểm dựa trên từ khóa
-                for word in query_lower.split():
-                    if word in alt_text or word in title_text:
-                        relevance_score += 1
+                alt_words = set(alt_text.split())
+                title_words = set(title_text.split())
+
+                # Exact word matches
+                alt_matches = len(query_words.intersection(alt_words))
+                title_matches = len(query_words.intersection(title_words))
+                relevance_score += (alt_matches * 2) + (title_matches * 2)
+
+                # Partial matches
+                for word in query_words:
+                    if len(word) > 3:
+                        if word in alt_text:
+                            relevance_score += 1
+                        if word in title_text:
+                            relevance_score += 1
 
                 # Bonus điểm cho ảnh có mô tả chi tiết
                 if len(alt_text) > 20 or len(title_text) > 20:
                     relevance_score += 0.5
 
+                # Bonus cho ảnh từ document có điểm cao
+                if hasattr(doc, 'search_weight'):
+                    relevance_score *= doc.search_weight
+
+                # Thêm ảnh nếu có điểm hoặc không có mô tả (fallback)
                 if relevance_score > 0 or (not alt_text and not title_text):
                     img_path = Path(img_info.get('local_path', ''))
                     if img_path.exists():
@@ -203,258 +225,181 @@ class EnhancedMultimodalRAGLocal:
                             'relevance_score': relevance_score
                         })
 
-        relevant_images.sort(key=lambda x: x['relevance_score'], reverse=True)
-        return relevant_images[:max_images]
+        # Sắp xếp theo điểm và loại bỏ trùng lặp
+        seen_paths = set()
+        unique_images = []
+        for img in sorted(relevant_images, key=lambda x: x['relevance_score'], reverse=True):
+            if img['path'] not in seen_paths:
+                unique_images.append(img)
+                seen_paths.add(img['path'])
 
-    def get_search_statistics(self):
-        """Thống kê hiệu suất tìm kiếm"""
-        if not self.query_history:
-            return {}
+        return unique_images[:max_images]
 
-        total_queries = len(self.query_history)
-        successful_queries = sum(1 for q in self.query_history if q['results_count'] > 0)
-        avg_similarity = np.mean([q['similarity'] for q in self.query_history])
+def display_database_debug_info(rag_system):
+    """Hiển thị thông tin debug chi tiết về database"""
+    st.subheader("🔍 Thông tin chi tiết Database")
+    
+    db_info = rag_system.get_database_info()
+    
+    # Metrics tổng quan
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("Documents", db_info['total_documents'])
+    with col2:
+        st.metric("Tổng từ", f"{db_info['total_words']:,}")
+    with col3:
+        st.metric("Tổng ảnh", db_info['total_images'])
+    with col4:
+        st.metric("Loại nội dung", len(db_info['content_types']))
 
-        intent_distribution = {}
-        for q in self.query_history:
-            intent = q['intent']
-            intent_distribution[intent] = intent_distribution.get(intent, 0) + 1
+    # Chi tiết content types
+    if db_info['content_types']:
+        st.write("**Phân loại nội dung:**")
+        for content_type, count in db_info['content_types'].items():
+            st.write(f"- {content_type}: {count} documents")
 
-        return {
-            'total_queries': total_queries,
-            'success_rate': successful_queries / total_queries * 100,
-            'average_similarity': avg_similarity,
-            'intent_distribution': intent_distribution
-        }
+    # Danh sách documents
+    with st.expander("📋 Danh sách Documents trong Database", expanded=False):
+        for i, title in enumerate(db_info['titles'], 1):
+            st.write(f"{i}. **{title}**")
+            if i-1 < len(db_info['urls']):
+                st.caption(f"URL: {db_info['urls'][i-1]}")
 
-    def get_database_statistics(self):
-        """Thống kê database"""
-        if not self.has_data:
-            return {}
-        
-        total_images = 0
-        total_text_length = 0
-        sites_info = []
-        
-        for doc in self.documents:
-            total_images += len(doc['images'])
-            total_text_length += len(doc['text_content'])
-            
-            # Tính kích thước thư mục
-            site_dir = self.db_dir / doc['site_name']
-            site_size = 0
-            if site_dir.exists():
-                for file_path in site_dir.rglob('*'):
-                    if file_path.is_file():
-                        site_size += file_path.stat().st_size
-            
-            sites_info.append({
-                'name': doc['title'],
-                'url': doc['url'],
-                'images': len(doc['images']),
-                'text_length': len(doc['text_content']),
-                'size_bytes': site_size,
-                'scraped_at': doc['metadata'].get('scraped_at', 'N/A')
-            })
-        
-        return {
-            'total_documents': len(self.documents),
-            'total_images': total_images,
-            'total_text_length': total_text_length,
-            'sites_info': sites_info
-        }
+    # Sample content
+    with st.expander("📄 Mẫu nội dung", expanded=False):
+        for sample in db_info['sample_content'][:3]:
+            st.write(f"**{sample['title']}**")
+            st.write(sample['sample'])
+            st.write("---")
 
-def check_ollama_connection(base_url):
-    """Kiểm tra kết nối tới Ollama server"""
+def get_server_info(config):
+    """Lấy thông tin server model API"""
+    server_info = {
+        'status': 'unknown',
+        'base_url': config.get('LOCAL_MODEL', {}).get('base_url', 'N/A'),
+        'model': config.get('LOCAL_MODEL', {}).get('model', 'N/A'),
+        'connection_status': False,
+        'response_time': None
+    }
+
     try:
-        # Đảm bảo URL đúng format
-        if isinstance(base_url, dict):
-            logger.error(f"base_url không đúng format: {base_url}")
-            return False, "URL không đúng format", "base_url phải là string"
-        
-        clean_url = str(base_url).rstrip('/')
-        if not clean_url.startswith(('http://', 'https://')):
-            clean_url = f"https://{clean_url}"
-        
-        logger.info(f"Kiểm tra kết nối tới: {clean_url}")
-        
-        # Thử endpoint health check
-        response = requests.get(clean_url, timeout=5)
-        logger.info(f"Response status: {response.status_code}")
-        
-        if response.status_code == 200:
-            return True, "Kết nối thành công", response.text.strip()
+        base_url = server_info['base_url']
+        if not base_url or base_url == 'N/A':
+            server_info['status'] = 'No URL configured'
+            return server_info
+
+        local_client = LocalGemmaClient(base_url=base_url, model=server_info['model'])
+        start_time = time.time()
+        connection_status = local_client.check_connection()
+        response_time = time.time() - start_time
+
+        server_info['connection_status'] = connection_status
+        server_info['response_time'] = response_time
+
+        if connection_status:
+            server_info['status'] = 'Connected'
         else:
-            return False, f"Server phản hồi không đúng: {response.status_code}", response.text
-            
-    except requests.exceptions.ConnectionError:
-        return False, "Không thể kết nối tới server", "Connection refused"
-    except requests.exceptions.Timeout:
-        return False, "Timeout khi kết nối", "Request timeout"
+            server_info['status'] = 'Connection Failed'
+
     except Exception as e:
-        logger.error(f"Lỗi kiểm tra kết nối: {e}")
-        return False, f"Lỗi không xác định: {str(e)}", str(e)
+        server_info['status'] = f'Error: {str(e)}'
+        logger.error(f"Lỗi khi lấy thông tin server: {e}")
 
-def get_ollama_models(base_url):
-    """Lấy danh sách models từ Ollama"""
-    try:
-        clean_url = str(base_url).rstrip('/')
-        if not clean_url.startswith(('http://', 'https://')):
-            clean_url = f"https://{clean_url}"
-            
-        models_url = f"{clean_url}/api/tags"
-        logger.info(f"Gọi API tags: {models_url}")
-        
-        response = requests.get(models_url, timeout=10)
-        
-        if response.status_code == 200:
-            data = response.json()
-            return True, data.get('models', [])
-        else:
-            logger.warning(f"API tags trả về status: {response.status_code}")
-            return False, []
-            
-    except Exception as e:
-        logger.error(f"Lỗi khi lấy danh sách models: {e}")
-        return False, []
+    return server_info
 
-def get_running_models(base_url):
-    """Lấy danh sách models đang chạy"""
-    try:
-        clean_url = str(base_url).rstrip('/')
-        if not clean_url.startswith(('http://', 'https://')):
-            clean_url = f"https://{clean_url}"
-            
-        ps_url = f"{clean_url}/api/ps"
-        response = requests.get(ps_url, timeout=10)
-        
-        if response.status_code == 200:
-            data = response.json()
-            models = data.get('models', [])
-            
-            # Làm sạch dữ liệu models
-            cleaned_models = []
-            for model in models:
-                if isinstance(model, dict):
-                    cleaned_model = {
-                        'name': str(model.get('name', 'Unknown')),
-                        'size': model.get('size'),
-                        'expires_at': model.get('expires_at')
-                    }
-                    cleaned_models.append(cleaned_model)
-            
-            return True, cleaned_models
-        else:
-            return False, []
-            
-    except Exception as e:
-        logger.error(f"Lỗi khi lấy running models: {e}")
-        return False, []
+def display_server_info():
+    """Hiển thị thông tin server trong sidebar"""
+    config = load_config_local()
+    server_info = get_server_info(config)
 
-def get_model_info(base_url, model_name):
-    """Lấy thông tin chi tiết của model"""
-    try:
-        clean_url = str(base_url).rstrip('/')
-        if not clean_url.startswith(('http://', 'https://')):
-            clean_url = f"https://{clean_url}"
-            
-        show_url = f"{clean_url}/api/show"
-        payload = {"name": model_name}
-        response = requests.post(show_url, json=payload, timeout=15)
-        
-        if response.status_code == 200:
-            return True, response.json()
-        else:
-            return False, {}
-            
-    except Exception as e:
-        logger.error(f"Lỗi khi lấy thông tin model {model_name}: {e}")
-        return False, {}
+    st.sidebar.header("🖥️ Thông tin Server")
 
-def format_model_size(size_bytes):
-    """Format kích thước model"""
-    if size_bytes is None:
-        return "N/A"
-    
-    try:
-        if isinstance(size_bytes, str):
-            size_bytes = int(size_bytes)
-        elif not isinstance(size_bytes, (int, float)):
-            return "N/A"
-    except (ValueError, TypeError):
-        return "N/A"
-    
-    if size_bytes <= 0:
-        return "0 B"
-    
-    for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
-        if size_bytes < 1024.0:
-            return f"{size_bytes:.1f} {unit}"
-        size_bytes /= 1024.0
-    return f"{size_bytes:.1f} PB"
-
-def format_duration(nanoseconds):
-    """Format thời gian từ nanoseconds"""
-    if nanoseconds is None:
-        return "N/A"
-    
-    try:
-        if isinstance(nanoseconds, str):
-            nanoseconds = int(nanoseconds)
-        elif not isinstance(nanoseconds, (int, float)):
-            return "N/A"
-    except (ValueError, TypeError):
-        return "N/A"
-    
-    if nanoseconds <= 0:
-        return "0s"
-    
-    seconds = nanoseconds / 1_000_000_000
-    
-    if seconds < 60:
-        return f"{seconds:.1f}s"
-    elif seconds < 3600:
-        minutes = seconds / 60
-        return f"{minutes:.1f}m"
+    # Status indicator
+    status = server_info['status']
+    if server_info['connection_status']:
+        st.sidebar.success(f"✅ {status}")
+    elif 'Error' in status or 'Failed' in status:
+        st.sidebar.error(f"❌ {status}")
     else:
-        hours = seconds / 3600
-        return f"{hours:.1f}h"
+        st.sidebar.warning(f"⚠️ {status}")
 
-def should_use_general_knowledge(relevant_docs, similarity, question):
-    """Kiểm tra xem có nên sử dụng kiến thức chung không"""
-    MIN_SIMILARITY = 0.2
+    # Server details
+    with st.sidebar.expander("Chi tiết Server", expanded=False):
+        st.write(f"**URL:** {server_info['base_url']}")
+        if server_info['response_time']:
+            st.write(f"**Thời gian phản hồi:** {server_info['response_time']:.3f}s")
+
+    # Model info
+    st.write(f"**Model hiện tại:** {server_info['model']}")
+
+def create_sidebar():
+    """Tạo sidebar với các chức năng điều khiển"""
+    st.sidebar.title("🔧 Điều khiển hệ thống")
+    display_server_info()
+
+    # Phần nhập URL mới
+    st.sidebar.header("📥 Thu thập dữ liệu mới")
+    with st.sidebar.expander("Thêm URL mới", expanded=False):
+        new_url = st.text_input(
+            "Nhập URL cần thu thập:",
+            placeholder="https://example.com/article",
+            key="new_url_input"
+        )
+
+        if st.button("Thu thập", key="collect_single", type="primary"):
+            if new_url:
+                collect_single_url(new_url)
+            else:
+                st.error("Vui lòng nhập URL")
+
+def collect_single_url(url):
+    """Thu thập dữ liệu từ một URL"""
+    try:
+        if not url.startswith(('http://', 'https://')):
+            st.error("URL phải bắt đầu bằng http:// hoặc https://")
+            return
+
+        with st.spinner(f"Đang thu thập từ {url}..."):
+            scraper = WebScraperLocal(overwrite=False)
+            success = scraper.fetch_and_save(url)
+            
+            if success:
+                st.success(f"✅ Thu thập thành công từ {url}")
+                if 'rag_system' in st.session_state:
+                    st.session_state.rag_system.load_multimodal_data()
+                st.rerun()
+            else:
+                st.error(f"❌ Không thể thu thập từ {url}")
+    except Exception as e:
+        st.error(f"Lỗi: {e}")
+        logger.error(f"Lỗi thu thập {url}: {e}")
+
+def handle_no_results_fallback(question, config):
+    """Xử lý fallback khi không tìm thấy kết quả trong database"""
+    st.info("🔍 Không tìm thấy thông tin liên quan trong database. Đang gọi AI để trả lời...")
     
-    if not relevant_docs:
-        return True
+    fallback_context = f"""
+    Câu hỏi: {question}
     
-    if similarity < MIN_SIMILARITY:
-        return True
+    Thông tin: Không tìm thấy thông tin cụ thể trong cơ sở dữ liệu về câu hỏi này.
     
-    total_content_length = 0
-    for doc in relevant_docs:
-        content = doc.get('text_content', '') + doc.get('description', '')
-        total_content_length += len(content.strip())
+    Hướng dẫn trả lời:
+    1. Trả lời dựa trên kiến thức chung về chủ đề được hỏi
+    2. Nêu rõ rằng đây là câu trả lời chung, không dựa trên dữ liệu cụ thể
+    3. Đề xuất người dùng tìm kiếm thêm thông tin hoặc cung cấp thêm dữ liệu
+    4. Trả lời bằng tiếng Việt một cách chi tiết và hữu ích
+    """
     
-    if total_content_length < 100:
-        return True
-    
-    question_words = set(question.lower().split())
-    content_words = set()
-    
-    for doc in relevant_docs:
-        content = doc.get('text_content', '') + doc.get('description', '') + doc.get('title', '')
-        content_words.update(content.lower().split())
-    
-    matching_words = question_words.intersection(content_words)
-    match_ratio = len(matching_words) / len(question_words) if question_words else 0
-    
-    if match_ratio < 0.1:
-        return True
-    
-    return False
+    try:
+        response = ask_local_model(question, fallback_context, config)
+        st.warning("⚠️ Câu trả lời dưới đây dựa trên kiến thức chung của AI, không dựa trên dữ liệu trong database của bạn.")
+        return response
+    except Exception as e:
+        logger.error(f"Error in fallback AI response: {e}")
+        return f"Xin lỗi, tôi không thể trả lời câu hỏi này vì không tìm thấy thông tin liên quan trong database và không thể kết nối với AI."
 
 def create_intelligent_multimodal_context(text_context, relevant_images, question):
-    """Tạo context đa phương tiện thông minh"""
+    """Tạo context đa phương tiện thông minh với hướng dẫn chèn ảnh"""
     context = f"Thông tin văn bản:\n{text_context}\n\n"
     
     if relevant_images:
@@ -466,6 +411,8 @@ def create_intelligent_multimodal_context(text_context, relevant_images, questio
             if img_info['title']:
                 context += f" Tiêu đề: {img_info['title']}"
             context += f" (Nguồn: {img_info['source_doc']['title']})"
+            if img_info['relevance_score'] > 0:
+                context += f" (Độ liên quan: {img_info['relevance_score']:.1f})"
 
     context += f"""
 
@@ -475,14 +422,11 @@ QUAN TRỌNG: Khi trả lời câu hỏi "{question}", hãy:
 3. Ví dụ: "Như bạn có thể thấy trong [IMAGE_1], điều này cho thấy..."
 4. Sử dụng [IMAGE_X] ở những vị trí phù hợp trong câu trả lời để minh họa nội dung
 5. Mỗi [IMAGE_X] sẽ được thay thế bằng hình ảnh tương ứng khi hiển thị
+6. Trả lời bằng tiếng Việt và dựa trên thông tin đã cung cấp
 
 Hãy tham khảo cả thông tin văn bản và hình ảnh để đưa ra câu trả lời toàn diện và có minh họa phù hợp."""
-
+    
     return context
-
-def create_general_knowledge_context(question):
-    """Tạo context cho kiến thức chung"""
-    return f"""Hãy trả lời ngắn gọn ít tốn token nhất với Câu hỏi: {question}"""
 
 def parse_answer_with_image_markers(answer, relevant_images):
     """Phân tích câu trả lời và tách các marker ảnh"""
@@ -517,9 +461,11 @@ def smart_display_answer_with_embedded_images(answer, relevant_images):
     content_parts = parse_answer_with_image_markers(answer, relevant_images)
     
     if not any(part['type'] == 'image' for part in content_parts):
+        # Nếu AI không sử dụng [IMAGE_X], tự động chèn ảnh
         auto_embed_images_in_answer(answer, relevant_images)
         return
 
+    # Hiển thị theo thứ tự AI đã chỉ định
     for part in content_parts:
         if part['type'] == 'text':
             st.markdown(part['content'])
@@ -535,19 +481,20 @@ def smart_display_answer_with_embedded_images(answer, relevant_images):
                 else:
                     caption = f"📷 Hình ảnh từ {img_info['source_doc']['title']}"
 
+                # Hiển thị ảnh với caption
                 col1, col2, col3 = st.columns([1, 3, 1])
                 with col2:
                     st.image(image, caption=caption, use_container_width=True)
-                
-                st.markdown("<br>", unsafe_allow_html=True)
+                st.markdown("", unsafe_allow_html=True)  # Spacing
             except Exception as e:
                 st.error(f"Không thể hiển thị ảnh: {e}")
 
 def auto_embed_images_in_answer(answer, relevant_images):
-    """Tự động chèn ảnh vào câu trả lời"""
+    """Tự động chèn ảnh vào câu trả lời nếu AI không sử dụng [IMAGE_X]"""
     paragraphs = [p.strip() for p in answer.split('\n\n') if p.strip()]
     
     if len(paragraphs) <= 1:
+        # Nếu không có đoạn văn, chia theo câu
         sentences = [s.strip() + '.' for s in answer.split('.') if s.strip()]
         paragraphs = sentences
 
@@ -558,6 +505,7 @@ def auto_embed_images_in_answer(answer, relevant_images):
         st.markdown(answer)
         return
 
+    # Tính toán vị trí chèn ảnh
     insert_positions = []
     if total_parts > 1:
         step = max(1, total_parts // (total_images + 1))
@@ -566,10 +514,12 @@ def auto_embed_images_in_answer(answer, relevant_images):
             if pos < total_parts:
                 insert_positions.append(pos)
 
+    # Hiển thị với ảnh được chèn
     image_index = 0
     for i, paragraph in enumerate(paragraphs):
         st.markdown(paragraph)
         
+        # Chèn ảnh tại vị trí được tính toán
         if i in insert_positions and image_index < len(relevant_images):
             img_info = relevant_images[image_index]
             try:
@@ -582,373 +532,229 @@ def auto_embed_images_in_answer(answer, relevant_images):
                 else:
                     caption = f"📷 Hình ảnh minh họa"
 
-                st.markdown("<br>", unsafe_allow_html=True)
+                # Spacing trước ảnh
+                st.markdown("", unsafe_allow_html=True)
+                
+                # Hiển thị ảnh ở giữa
                 col1, col2, col3 = st.columns([1, 3, 1])
                 with col2:
                     st.image(image, caption=caption, use_container_width=True)
-                st.markdown("<br>", unsafe_allow_html=True)
                 
+                # Spacing sau ảnh
+                st.markdown("", unsafe_allow_html=True)
                 image_index += 1
             except Exception as e:
                 st.error(f"Không thể hiển thị ảnh: {e}")
 
-def collect_single_url(url):
-    """Thu thập dữ liệu từ một URL"""
-    try:
-        scraper = WebScraperLocal(overwrite=False)
-        success = scraper.fetch_and_save(url)
-        return success, scraper.success_count, scraper.error_count
-    except Exception as e:
-        return False, 0, 1
-
-def process_question(question):
-    """Xử lý câu hỏi và hiển thị kết quả"""
-    with st.spinner("🔍 Đang tìm kiếm và phân tích..."):
-        try:
-            # Khởi tạo AI client
-            config = load_config_local()
-            client = LocalGemmaClient(config["LOCAL_MODEL"])
-
-            # Tìm kiếm documents liên quan
-            relevant_docs, similarity = st.session_state.rag_system.enhanced_search_multimodal(
-                question, threshold=0.3, top_k=3
-            )
-
-            # Kiểm tra xem có nên sử dụng kiến thức chung không
-            use_general = should_use_general_knowledge(relevant_docs, similarity, question)
-
-            if use_general:
-                # Không tìm thấy thông tin liên quan - trả lời bằng kiến thức chung
-                st.warning("⚠️ Không tìm thấy thông tin liên quan trong database. AI sẽ trả lời dựa trên kiến thức chung.")
-                
-                general_context = create_general_knowledge_context(question)
-                
-                answer = client.generate_response(
-                    prompt=question,
-                    context=general_context,
-                    max_tokens=2000
-                )
-
-                # Lưu vào lịch sử với thông tin đặc biệt
-                st.session_state.chat_history.append((question, answer, [], "general"))
-                
-                # Hiển thị kết quả
-                st.markdown(f"**🙋 Bạn:** {question}")
-                st.markdown("**🤖 AI (Kiến thức chung):**")
-                st.markdown(answer)
-                
-                # Hiển thị thông tin debug
-                with st.expander("🔍 Thông tin tìm kiếm"):
-                    st.write(f"**Độ tương đồng:** {similarity:.3f} (thấp hơn ngưỡng)")
-                    st.write(f"**Số documents tìm thấy:** {len(relevant_docs)}")
-                    st.write("**Trạng thái:** Trả lời bằng kiến thức chung")
-
-            else:
-                # Tìm thấy thông tin liên quan - xử lý như bình thường
-                # Tạo context từ documents
-                text_context = ""
-                for doc in relevant_docs:
-                    text_context += f"\n\n--- {doc['title']} ---\n"
-                    text_context += f"{doc['description']}\n"
-                    text_context += f"{doc['text_content'][:1000]}..."
-
-                # Lấy ảnh liên quan
-                relevant_images = st.session_state.rag_system.get_relevant_images_for_context(
-                    relevant_docs, question, max_images=5
-                )
-
-                # Tạo context đa phương tiện
-                multimodal_context = create_intelligent_multimodal_context(
-                    text_context, relevant_images, question
-                )
-
-                # Gọi AI để trả lời
-                answer = client.generate_response(
-                    prompt=question,
-                    context=multimodal_context,
-                    max_tokens=2000
-                )
-
-                # Lưu vào lịch sử
-                st.session_state.chat_history.append((question, answer, relevant_images, "rag"))
-                
-                # Hiển thị kết quả
-                st.markdown(f"**🙋 Bạn:** {question}")
-                st.markdown("**🤖 AI:**")
-                smart_display_answer_with_embedded_images(answer, relevant_images)
-                
-                # Hiển thị thông tin debug
-                with st.expander("🔍 Thông tin tìm kiếm"):
-                    st.write(f"**Độ tương đồng:** {similarity:.3f}")
-                    st.write(f"**Số documents tìm thấy:** {len(relevant_docs)}")
-                    st.write(f"**Số ảnh liên quan:** {len(relevant_images)}")
-                    
-                    for i, doc in enumerate(relevant_docs, 1):
-                        st.write(f"**{i}.** {doc['title']}")
-
-        except Exception as e:
-            st.error(f"❌ Lỗi khi xử lý câu hỏi: {e}")
-            logger.error(f"Lỗi process_question: {e}")
-            traceback.print_exc()
-
 def main():
+    """Hàm chính của ứng dụng với ảnh chèn trong nội dung"""
     st.set_page_config(
-        page_title="🤖 Multimodal RAG Local với Gemma",
+        page_title="RAG Local với Ảnh Chèn",
         page_icon="🤖",
         layout="wide",
         initial_sidebar_state="expanded"
     )
 
-    # Khởi tạo session state
+    # Tạo sidebar
+    create_sidebar()
+
+    # Header chính
+    st.title("🤖 Hệ thống RAG Local với Ảnh Chèn Thông Minh")
+    st.markdown("---")
+
+    # Khởi tạo RAG system
     if 'rag_system' not in st.session_state:
-        st.session_state.rag_system = EnhancedMultimodalRAGLocal("../db")
-    
-    if 'chat_history' not in st.session_state:
-        st.session_state.chat_history = []
+        with st.spinner("Đang khởi tạo hệ thống..."):
+            st.session_state.rag_system = EnhancedMultimodalRAGLocal("db")
 
-    # Load config
-    config = load_config_local()
-    base_url = config["LOCAL_MODEL"]["base_url"]
-    current_model = config["LOCAL_MODEL"]["model"]
+    rag_system = st.session_state.rag_system
 
-    # Sidebar với URL Collector và thông tin Ollama
-    with st.sidebar:
-        st.markdown("## 🌐 Thu thập dữ liệu")
-        
-        # Ô nhập URL
-        new_url = st.text_input(
-            "Nhập URL để thu thập:",
-            placeholder="https://example.com/article",
-            help="Nhập URL của trang web bạn muốn thu thập dữ liệu"
-        )
+    # Kiểm tra dữ liệu
+    if not rag_system.has_data:
+        st.warning("⚠️ Chưa có dữ liệu. Vui lòng thu thập dữ liệu từ sidebar.")
         
         col1, col2 = st.columns(2)
         with col1:
-            if st.button("🔄 Thu thập", use_container_width=True):
-                if new_url.strip():
-                    with st.spinner("Đang thu thập dữ liệu..."):
-                        success, success_count, error_count = collect_single_url(new_url.strip())
-                        
-                        if success:
-                            st.success(f"✅ Thu thập thành công!")
-                            # Reload dữ liệu
-                            st.session_state.rag_system.load_multimodal_data()
-                            st.rerun()
-                        else:
-                            st.error(f"❌ Lỗi thu thập dữ liệu")
-                else:
-                    st.warning("⚠️ Vui lòng nhập URL")
+            st.info("💡 **Hướng dẫn sử dụng:**")
+            st.write("1. Sử dụng sidebar bên trái để thêm URL")
+            st.write("2. Nhấn 'Thu thập' để tải dữ liệu")
+            st.write("3. Sau khi có dữ liệu, bạn có thể đặt câu hỏi")
         
         with col2:
-            if st.button("🔄 Reload DB", use_container_width=True):
-                with st.spinner("Đang tải lại dữ liệu..."):
-                    st.session_state.rag_system.load_multimodal_data()
-                    st.success("✅ Đã tải lại database")
-                    st.rerun()
-
-        st.markdown("---")
-
-        # Thông tin Ollama Server
-        st.markdown("## 🔗 Ollama Server")
+            st.info("🔧 **Tính năng có sẵn:**")
+            st.write("- Thu thập từ URL đơn lẻ")
+            st.write("- Ảnh chèn thông minh trong câu trả lời")
+            st.write("- AI fallback khi không tìm thấy")
+            st.write("- Debug thông tin database")
         
-        # Kiểm tra kết nối
-        is_connected, status_msg, response_text = check_ollama_connection(base_url)
-        
-        if is_connected:
-            st.success(f"✅ {status_msg}")
-            st.caption(f"🌐 {base_url}")
-        else:
-            st.error(f"❌ {status_msg}")
-            st.caption(f"🌐 {base_url}")
-            
-        # Hiển thị thông tin models
-        if is_connected:
-            with st.expander("🤖 Thông tin Models", expanded=True):
-                # Model hiện tại
-                st.markdown(f"**Model đang dùng:** `{current_model}`")
-                
-                # Lấy thông tin chi tiết model hiện tại
-                success, model_info = get_model_info(base_url, current_model)
-                if success:
-                    if 'details' in model_info:
-                        details = model_info['details']
-                        st.write(f"**Kích thước:** {format_model_size(details.get('size'))}")
-                        st.write(f"**Format:** {details.get('format', 'N/A')}")
-                        st.write(f"**Family:** {details.get('family', 'N/A')}")
-                        if 'parameter_size' in details:
-                            st.write(f"**Parameters:** {details['parameter_size']}")
-                
-                # Models đang chạy
-                success, running_models = get_running_models(base_url)
-                if success and running_models:
-                    st.markdown("**🟢 Models đang chạy:**")
-                    for model in running_models:
-                        name = model.get('name', 'Unknown')
-                        size = format_model_size(model.get('size'))
-                        expires_at = model.get('expires_at')
-                        
-                        st.write(f"• `{name}` ({size})")
-                        if expires_at:
-                            expire_time = format_duration(expires_at)
-                            st.caption(f"  Expires: {expire_time}")
-                else:
-                    st.write("**🔴 Không có model nào đang chạy**")
-                
-                # Tất cả models có sẵn
-                success, all_models = get_ollama_models(base_url)
-                if success and all_models:
-                    st.markdown("**📦 Models có sẵn:**")
-                    for model in all_models[:5]:  # Hiển thị tối đa 5 models
-                        name = model.get('name', 'Unknown')
-                        size = format_model_size(model.get('size'))
-                        modified = model.get('modified_at', '')
-                        
-                        if modified:
-                            try:
-                                mod_date = datetime.fromisoformat(modified.replace('Z', '+00:00'))
-                                mod_str = mod_date.strftime('%d/%m/%Y')
-                            except:
-                                mod_str = modified[:10]
-                        else:
-                            mod_str = 'N/A'
-                        
-                        st.write(f"• `{name}` ({size})")
-                        st.caption(f"  Modified: {mod_str}")
-                    
-                    if len(all_models) > 5:
-                        st.caption(f"... và {len(all_models) - 5} models khác")
+        return
 
-        st.markdown("---")
+    # Hiển thị thông tin database
+    display_database_debug_info(rag_system)
+    st.markdown("---")
 
-        # Thông tin Database
-        st.markdown("## 📊 Thông tin Database")
-        
-        if st.session_state.rag_system.has_data:
-            db_stats = st.session_state.rag_system.get_database_statistics()
-            
-            # Metrics tổng quan
-            col1, col2 = st.columns(2)
-            with col1:
-                st.metric("Documents", db_stats['total_documents'])
-                st.metric("Hình ảnh", db_stats['total_images'])
-            with col2:
-                text_kb = db_stats['total_text_length'] / 1024
-                st.metric("Text", f"{text_kb:.1f} KB")
-                
-                # Tính tổng kích thước
-                total_size = sum(site['size_bytes'] for site in db_stats['sites_info'])
-                st.metric("Tổng kích thước", format_model_size(total_size))
-            
-            # Chi tiết từng site
-            with st.expander("📚 Chi tiết Documents"):
-                for i, site in enumerate(db_stats['sites_info'], 1):
-                    st.write(f"**{i}.** {site['name']}")
-                    st.caption(f"🔗 {site['url']}")
-                    
-                    col1, col2, col3 = st.columns(3)
-                    with col1:
-                        st.caption(f"🖼️ {site['images']} ảnh")
-                    with col2:
-                        st.caption(f"📄 {site['text_length']} ký tự")
-                    with col3:
-                        st.caption(f"💾 {format_model_size(site['size_bytes'])}")
-                    
-                    # Thời gian thu thập
-                    scraped_at = site['scraped_at']
-                    if scraped_at != 'N/A':
-                        try:
-                            scraped_date = datetime.fromisoformat(scraped_at.replace('Z', '+00:00'))
-                            scraped_str = scraped_date.strftime('%d/%m/%Y %H:%M')
-                            st.caption(f"⏰ Thu thập: {scraped_str}")
-                        except:
-                            st.caption(f"⏰ Thu thập: {scraped_at[:19]}")
-                    
-                    st.markdown("---")
-        else:
-            st.warning("⚠️ Chưa có dữ liệu trong database")
-            st.info("💡 Hãy thu thập dữ liệu từ URL hoặc chạy collect_local.py")
+    # Phần hỏi đáp chính
+    st.header("💬 Hỏi đáp thông minh với Ảnh Minh Họa")
 
-        # Thống kê tìm kiếm
-        stats = st.session_state.rag_system.get_search_statistics()
-        if stats:
-            st.markdown("### 📈 Thống kê Tìm kiếm")
-            st.metric("Tổng truy vấn", stats['total_queries'])
-            st.metric("Tỷ lệ thành công", f"{stats['success_rate']:.1f}%")
-            st.metric("Độ tương đồng TB", f"{stats['average_similarity']:.3f}")
-            
-            # Intent distribution
-            if stats['intent_distribution']:
-                st.markdown("**Phân bố Intent:**")
-                for intent, count in stats['intent_distribution'].items():
-                    percentage = (count / stats['total_queries']) * 100
-                    st.caption(f"• {intent}: {count} ({percentage:.1f}%)")
-
-    # Main content
-    st.title("🤖 Multimodal RAG Local với Gemma")
-    st.markdown("*Hệ thống tìm kiếm và trả lời thông minh với hình ảnh*")
-
-    # Hiển thị trạng thái kết nối
-    col1, col2 = st.columns([3, 1])
-    with col1:
-        if is_connected:
-            st.success(f"🔗 Kết nối Ollama: **{current_model}** tại {base_url}")
-        else:
-            st.error(f"❌ Không thể kết nối Ollama tại {base_url}")
-    
-    with col2:
-        if st.button("🔄 Kiểm tra lại", use_container_width=True):
-            st.rerun()
-
-    # Thông báo về chế độ hoạt động
-    if not st.session_state.rag_system.has_data:
-        st.info("🧠 **Chế độ AI Chung**: Không có database, AI sẽ trả lời dựa trên kiến thức chung")
-    else:
-        st.success("🔍 **Chế độ RAG**: AI sẽ tìm kiếm trong database trước, nếu không có sẽ dùng kiến thức chung")
-
-    # Chat interface
-    st.markdown("## 💬 Trò chuyện với AI")
-
-    # Hiển thị lịch sử chat
-    for i, chat_item in enumerate(st.session_state.chat_history):
-        if len(chat_item) == 4:  # Định dạng mới với mode
-            question, answer, images, mode = chat_item
-        else:  # Định dạng cũ
-            question, answer, images = chat_item
-            mode = "rag" if images else "general"
-            
-        with st.container():
-            st.markdown(f"**🙋 Bạn:** {question}")
-            if mode == "general":
-                st.markdown("**🤖 AI (Kiến thức chung):**")
-                st.markdown(answer)
-            else:
-                st.markdown("**🤖 AI:**")
-                smart_display_answer_with_embedded_images(answer, images)
-            st.markdown("---")
-
-    # Input cho câu hỏi mới
+    # Input câu hỏi
     question = st.text_input(
-        "Đặt câu hỏi của bạn:",
-        placeholder="Ví dụ: Python là gì? Machine Learning hoạt động như thế nào?...",
-        key="question_input"
+        "Đặt câu hỏi:",
+        placeholder="Ví dụ: cách cài đặt Oracle 19c, ZooKeeper là gì...",
+        help="Nhập câu hỏi và nhấn Enter để tìm kiếm"
     )
 
-    col1, col2, col3 = st.columns([2, 1, 1])
-    
-    with col1:
-        if st.button("🚀 Gửi câu hỏi", use_container_width=True) and question:
-            if is_connected:
-                process_question(question)
-            else:
-                st.error("❌ Không thể gửi câu hỏi. Vui lòng kiểm tra kết nối Ollama.")
-    
-    with col2:
-        if st.button("🗑️ Xóa lịch sử", use_container_width=True):
-            st.session_state.chat_history = []
-            st.rerun()
-    
-    with col3:
-        threshold = st.slider("🎯 Ngưỡng tìm kiếm", 0.1, 0.8, 0.3, 0.1)
+    # Tùy chọn nâng cao
+    with st.expander("⚙️ Tùy chọn tìm kiếm", expanded=False):
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            threshold = st.slider(
+                "Ngưỡng tìm kiếm:",
+                min_value=0.01,
+                max_value=0.8,
+                value=0.05,
+                step=0.01,
+                help="Ngưỡng thấp hơn = kết quả nhiều hơn nhưng ít chính xác hơn"
+            )
+        
+        with col2:
+            max_results = st.selectbox(
+                "Số kết quả tối đa:",
+                options=[1, 2, 3, 4, 5],
+                index=2
+            )
+
+    if question:
+        with st.spinner("🔍 Đang tìm kiếm và tạo câu trả lời..."):
+            try:
+                # Hiển thị debug info
+                st.info(f"🔍 Đang tìm kiếm: '{question}' với threshold {threshold}")
+                
+                # Tìm kiếm documents liên quan
+                relevant_docs, similarity = rag_system.enhanced_search_multimodal(
+                    question, threshold, max_results
+                )
+
+                # Debug thông tin tìm kiếm chi tiết
+                st.subheader("🔍 Kết quả tìm kiếm")
+                
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("Độ tương tự tối đa", f"{similarity:.3f}")
+                with col2:
+                    st.metric("Số documents tìm thấy", len(relevant_docs))
+                with col3:
+                    st.metric("Ngưỡng sử dụng", f"{threshold:.3f}")
+                with col4:
+                    # Hiển thị threshold đề xuất
+                    suggested_threshold = max(0.01, similarity * 0.8) if similarity > 0 else 0.01
+                    st.metric("Threshold đề xuất", f"{suggested_threshold:.3f}")
+
+                # Nếu không tìm thấy, thử các phương pháp khác
+                if not relevant_docs:
+                    st.warning("⚠️ Không tìm thấy với tìm kiếm chính, đang thử các phương pháp khác...")
+                    
+                    # Thử tìm kiếm fuzzy
+                    words = question.split()
+                    st.write("**Đang thử tìm kiếm từng từ:**")
+                    for word in words:
+                        if len(word) > 2:
+                            word_results, word_sim = rag_system.enhanced_search_multimodal(word, 0.01, 1)
+                            st.write(f"- '{word}': {len(word_results)} kết quả (sim: {word_sim:.3f})")
+                            if word_results:
+                                relevant_docs = word_results
+                                similarity = word_sim
+                                st.success(f"✅ Tìm thấy kết quả với từ khóa: '{word}'")
+                                break
+
+                if relevant_docs:
+                    # Hiển thị documents tìm thấy
+                    with st.expander("📋 Documents được tìm thấy", expanded=True):
+                        for i, doc in enumerate(relevant_docs, 1):
+                            st.write(f"**{i}. {doc['title']}**")
+                            st.caption(f"URL: {doc['url']}")
+                            st.caption(f"Loại: {doc['metadata'].get('content_type', 'unknown')}")
+                            st.caption(f"Số từ: {doc['metadata'].get('word_count', 0)}")
+                            
+                            # Show snippet với highlight
+                            snippet = doc['text_content'][:300] + "..."
+                            # Highlight query words trong snippet
+                            highlighted_snippet = snippet
+                            for word in question.split():
+                                if len(word) > 3:
+                                    highlighted_snippet = highlighted_snippet.replace(
+                                        word, f"**{word}**"
+                                    )
+                            st.write(f"*Đoạn trích:* {highlighted_snippet}")
+                            st.write("---")
+
+                    # Tạo context và trả lời
+                    text_context = "\n\n".join([
+                        f"Tiêu đề: {doc['title']}\nMô tả: {doc['description']}\nNội dung: {doc['text_content'][:1000]}..."
+                        for doc in relevant_docs
+                    ])
+
+                    relevant_images = rag_system.get_relevant_images_for_context(
+                        relevant_docs, question, 5
+                    )
+
+                    context = create_intelligent_multimodal_context(
+                        text_context, relevant_images, question
+                    )
+
+                    config = load_config_local()
+                    answer = ask_local_model(question, context, config)
+
+                    # Hiển thị kết quả với ảnh chèn thông minh
+                    st.subheader("📝 Câu trả lời:")
+                    smart_display_answer_with_embedded_images(answer, relevant_images)
+
+                    # Hiển thị thông tin ảnh đã sử dụng
+                    if relevant_images:
+                        with st.expander("🖼️ Thông tin ảnh đã sử dụng", expanded=False):
+                            for i, img_info in enumerate(relevant_images, 1):
+                                st.write(f"**Ảnh {i}:**")
+                                st.write(f"- Nguồn: {img_info['source_doc']['title']}")
+                                if img_info['alt']:
+                                    st.write(f"- Mô tả: {img_info['alt']}")
+                                if img_info['title']:
+                                    st.write(f"- Tiêu đề: {img_info['title']}")
+                                st.write(f"- Độ liên quan: {img_info['relevance_score']:.2f}")
+                                st.write("---")
+
+                else:
+                    # Fallback mechanism - gọi AI trực tiếp
+                    st.subheader("📝 Câu trả lời (AI Fallback):")
+                    config = load_config_local()
+                    fallback_answer = handle_no_results_fallback(question, config)
+                    st.markdown(fallback_answer)
+                    
+                    st.info("💡 **Gợi ý cải thiện:**")
+                    st.write("- Database có thể chưa chứa thông tin về chủ đề này")
+                    st.write("- Thử sử dụng từ khóa đơn giản hơn")
+                    st.write("- Thu thập thêm dữ liệu liên quan từ sidebar")
+
+            except Exception as e:
+                st.error(f"❌ Lỗi khi xử lý câu hỏi: {e}")
+                logger.error(f"Lỗi xử lý câu hỏi: {e}")
+                
+                # Emergency fallback
+                st.info("🔄 Đang thử phương pháp dự phòng...")
+                try:
+                    config = load_config_local()
+                    emergency_answer = handle_no_results_fallback(question, config)
+                    st.subheader("📝 Câu trả lời (Dự phòng):")
+                    st.markdown(emergency_answer)
+                except Exception as e2:
+                    st.error(f"❌ Không thể tạo câu trả lời: {e2}")
+                    st.info("Vui lòng thử lại sau hoặc kiểm tra kết nối với model local.")
+
+    # Footer
+    st.markdown("---")
+    st.markdown(
+        "🤖 **RAG Local System với Ảnh Chèn Thông Minh** - "
+        "Powered by Enhanced Search & Streamlit"
+    )
 
 if __name__ == "__main__":
     main()
