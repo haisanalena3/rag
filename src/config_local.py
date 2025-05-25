@@ -12,37 +12,49 @@ def load_config_local():
         "USE_LOCAL_MODEL": True,
         "LOCAL_MODEL": {
             "base_url": "https://ktool.thangnotes.dev",
-            "model": "gemma3:4b",  # Có thể thay bằng gemma3:1b hoặc gemma3:8b
+            "model": "gemma3:4b",
             "max_tokens": 2000,
             "temperature": 0.3,
             "top_p": 0.4,
             "timeout": 180
         },
 
-        # Vector Database Configuration - FIXED
+        # Vector Database Configuration
         "VECTOR_DB": {
-            "enabled": False,  # Tạm tắt để dùng traditional search
+            "enabled": False,
             "db_path": "vector_database",
             "embedding_model": "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
             "vector_dimension": 384,
-            "similarity_threshold": 0.1,  # Giảm threshold
+            "similarity_threshold": 0.1,
             "max_results": 10,
             "index_type": "faiss",
             "distance_metric": "cosine"
         },
 
-        # Cấu hình database - FIXED
-        "DB_THRESHOLD": 0.05,  # Giảm threshold xuống rất thấp
+        # Cấu hình database - Giữ threshold thấp để tìm được nhiều kết quả
+        "DB_THRESHOLD": 0.3,
+        "MIN_SIMILARITY_THRESHOLD": 0.2,  # Threshold rất thấp
         "MAX_SEARCH_RESULTS": 5,
         "MAX_IMAGES_PER_RESPONSE": 8,
+
+        # Cấu hình validation - TẮT strict validation
+        "QUERY_VALIDATION": {
+            "min_query_length": 1,  # Giảm xuống 1
+            "max_query_length": 1000,  # Tăng lên
+            "enable_domain_check": False,  # TẮT domain check
+            "enable_relevance_check": False,  # TẮT relevance check
+            "enable_strict_mode": False,  # TẮT strict mode
+            "allow_general_questions": True,  # CHO PHÉP câu hỏi tổng quát
+            "fallback_to_ai": True  # Luôn fallback to AI
+        },
 
         # Cấu hình scraping nâng cao
         "SCRAPING": {
             "timeout": 20,
             "max_retries": 3,
             "delay_between_requests": 1.5,
-            "max_image_size": 15 * 1024 * 1024,  # 15MB
-            "min_image_size": 512,  # 512 bytes
+            "max_image_size": 15 * 1024 * 1024,
+            "min_image_size": 512,
             "min_image_dimensions": (32, 32),
             "user_agents": [
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
@@ -57,7 +69,7 @@ def load_config_local():
             }
         },
 
-        # Advanced Search Configuration - FIXED
+        # Advanced Search Configuration
         "SEARCH": {
             "enable_semantic_search": True,
             "enable_keyword_search": True,

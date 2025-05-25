@@ -10,3 +10,4 @@ sentence_transformers
 faiss-cpu
 aiofiles
 torch==2.6.0
+spacy

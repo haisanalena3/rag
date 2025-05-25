@@ -32,7 +32,7 @@ class VectorDatabase:
         
         # Vector storage
         self.vector_dimension = self.vector_config.get('vector_dimension', 384)
-        self.similarity_threshold = self.vector_config.get('similarity_threshold', 0.7)
+        self.similarity_threshold = self.vector_config.get('similarity_threshold', 0.5)
         
         # Initialize databases
         self.init_databases()
@@ -40,18 +40,15 @@ class VectorDatabase:
     
     def init_databases(self):
         """Khởi tạo SQLite và FAISS databases"""
-        # SQLite for metadata
         self.metadata_db = sqlite3.connect(
             self.db_path / "metadata.db", 
             check_same_thread=False
         )
         self.init_metadata_tables()
         
-        # FAISS for vector search
-        self.faiss_index = faiss.IndexFlatIP(self.vector_dimension)  # Inner product for cosine similarity
-        self.document_ids = []  # Map FAISS indices to document IDs
+        self.faiss_index = faiss.IndexFlatIP(self.vector_dimension)
+        self.document_ids = []
         
-        # TF-IDF for keyword search backup
         self.tfidf_vectorizer = TfidfVectorizer(
             max_features=10000,
             ngram_range=(1, 3),
@@ -65,7 +62,6 @@ class VectorDatabase:
         """Khởi tạo bảng metadata"""
         cursor = self.metadata_db.cursor()
         
-        # Documents table
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS documents (
                 id TEXT PRIMARY KEY,
@@ -87,7 +83,6 @@ class VectorDatabase:
             )
         """)
         
-        # Images table
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS images (
                 id TEXT PRIMARY KEY,
@@ -106,7 +101,6 @@ class VectorDatabase:
             )
         """)
         
-        # Search history table
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS search_history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -137,17 +131,13 @@ class VectorDatabase:
         """Thêm document vào vector database"""
         try:
             doc_id = doc_data['id']
-            
-            # Tạo embedding cho content
             content_text = f"{doc_data.get('title', '')} {doc_data.get('description', '')} {doc_data.get('content', '')}"
             embedding = self.create_embedding(content_text)
             
-            # Thêm vào FAISS index
             embedding_id = self.faiss_index.ntotal
             self.faiss_index.add(embedding.reshape(1, -1))
             self.document_ids.append(doc_id)
             
-            # Lưu metadata vào SQLite
             cursor = self.metadata_db.cursor()
             cursor.execute("""
                 INSERT OR REPLACE INTO documents 
@@ -166,7 +156,7 @@ class VectorDatabase:
             ))
             
             self.metadata_db.commit()
-            logger.info(f"Đã thêm document {doc_id} vào vector database")
+            logger.info(f"Đã thêm document {doc_id}")
             return True
             
         except Exception as e:
@@ -177,17 +167,13 @@ class VectorDatabase:
         """Thêm image vào vector database"""
         try:
             img_id = img_data['id']
-            
-            # Tạo embedding cho image description
             img_text = f"{img_data.get('alt_text', '')} {img_data.get('title', '')} {img_data.get('description', '')}"
             embedding = self.create_embedding(img_text)
             
-            # Thêm vào FAISS index (có thể tách riêng cho images)
             embedding_id = self.faiss_index.ntotal
             self.faiss_index.add(embedding.reshape(1, -1))
             self.document_ids.append(f"img_{img_id}")
             
-            # Lưu metadata
             cursor = self.metadata_db.cursor()
             cursor.execute("""
                 INSERT OR REPLACE INTO images
@@ -209,29 +195,20 @@ class VectorDatabase:
             return False
     
     def search_similar(self, query: str, top_k: int = 5, search_type: str = "hybrid") -> List[Dict]:
-        """Tìm kiếm similar documents"""
+        """Tìm kiếm similar documents với hybrid search"""
         try:
             start_time = datetime.now()
             
-            if search_type == "vector" or search_type == "hybrid":
+            vector_results = []
+            keyword_results = []
+            
+            if search_type in ["vector", "hybrid"]:
                 vector_results = self._vector_search(query, top_k)
-            else:
-                vector_results = []
-            
-            if search_type == "keyword" or search_type == "hybrid":
+            if search_type in ["keyword", "hybrid"]:
                 keyword_results = self._keyword_search(query, top_k)
-            else:
-                keyword_results = []
             
-            # Combine and rerank results
-            if search_type == "hybrid":
-                combined_results = self._combine_results(vector_results, keyword_results, top_k)
-            elif search_type == "vector":
-                combined_results = vector_results
-            else:
-                combined_results = keyword_results
+            combined_results = self._combine_results(vector_results, keyword_results, top_k)
             
-            # Log search history
             search_time = (datetime.now() - start_time).total_seconds()
             self._log_search(query, search_type, len(combined_results), 
                            combined_results[0]['similarity'] if combined_results else 0, search_time)
@@ -248,8 +225,6 @@ class VectorDatabase:
             return []
         
         query_embedding = self.create_embedding(query)
-        
-        # Search in FAISS
         similarities, indices = self.faiss_index.search(
             query_embedding.reshape(1, -1), 
             min(top_k * 2, self.faiss_index.ntotal)
@@ -277,7 +252,6 @@ class VectorDatabase:
     def _keyword_search(self, query: str, top_k: int) -> List[Dict]:
         """Tìm kiếm keyword với TF-IDF"""
         try:
-            # Get all documents
             cursor = self.metadata_db.cursor()
             cursor.execute("SELECT id, title, description, content FROM documents")
             docs = cursor.fetchall()
@@ -285,7 +259,6 @@ class VectorDatabase:
             if not docs:
                 return []
             
-            # Prepare corpus
             corpus = []
             doc_ids = []
             for doc in docs:
@@ -294,24 +267,20 @@ class VectorDatabase:
                 corpus.append(text)
                 doc_ids.append(doc_id)
             
-            # Fit TF-IDF if not fitted
             if not self.tfidf_fitted:
                 self.tfidf_vectorizer.fit(corpus)
                 self.tfidf_fitted = True
             
-            # Transform corpus and query
             doc_vectors = self.tfidf_vectorizer.transform(corpus)
             query_vector = self.tfidf_vectorizer.transform([query])
             
-            # Calculate similarities
             similarities = cosine_similarity(query_vector, doc_vectors).flatten()
             
-            # Get top results
             top_indices = np.argsort(similarities)[::-1][:top_k]
             
             results = []
             for i, idx in enumerate(top_indices):
-                if similarities[idx] < 0.1:  # Minimum threshold for keyword search
+                if similarities[idx] < 0.3:  # Ngưỡng chặt chẽ hơn
                     continue
                 
                 doc_id = doc_ids[idx]
@@ -336,24 +305,20 @@ class VectorDatabase:
         """Kết hợp kết quả vector và keyword search"""
         combined = {}
         
-        # Add vector results with higher weight
         for result in vector_results:
             doc_id = result['id']
             combined[doc_id] = result.copy()
-            combined[doc_id]['combined_score'] = result['similarity'] * 0.7
+            combined[doc_id]['combined_score'] = result['similarity'] * 0.6
         
-        # Add keyword results
         for result in keyword_results:
             doc_id = result['id']
             if doc_id in combined:
-                # Boost score if found in both
-                combined[doc_id]['combined_score'] += result['similarity'] * 0.3
+                combined[doc_id]['combined_score'] += result['similarity'] * 0.4
                 combined[doc_id]['search_type'] = 'hybrid'
             else:
                 combined[doc_id] = result.copy()
-                combined[doc_id]['combined_score'] = result['similarity'] * 0.5
+                combined[doc_id]['combined_score'] = result['similarity'] * 0.4
         
-        # Sort by combined score
         sorted_results = sorted(combined.values(), key=lambda x: x['combined_score'], reverse=True)
         return sorted_results[:top_k]
     
@@ -363,15 +328,13 @@ class VectorDatabase:
             cursor = self.metadata_db.cursor()
             
             if doc_id.startswith('img_'):
-                # Image metadata
-                img_id = doc_id[4:]  # Remove 'img_' prefix
+                img_id = doc_id[4:]
                 cursor.execute("SELECT * FROM images WHERE id = ?", (img_id,))
                 row = cursor.fetchone()
                 if row:
                     columns = [desc[0] for desc in cursor.description]
                     return dict(zip(columns, row))
             else:
-                # Document metadata
                 cursor.execute("SELECT * FROM documents WHERE id = ?", (doc_id,))
                 row = cursor.fetchone()
                 if row:
@@ -400,15 +363,10 @@ class VectorDatabase:
     def save_to_disk(self):
         """Lưu FAISS index và metadata vào disk"""
         try:
-            # Save FAISS index
             faiss.write_index(self.faiss_index, str(self.db_path / "faiss_index.bin"))
-            
-            # Save document IDs mapping
             with open(self.db_path / "document_ids.pkl", 'wb') as f:
                 pickle.dump(self.document_ids, f)
-            
-            logger.info("Đã lưu vector database vào disk")
-            
+            logger.info("Đã lưu vector database")
         except Exception as e:
             logger.error(f"Lỗi lưu database: {e}")
     
@@ -419,15 +377,10 @@ class VectorDatabase:
             ids_file = self.db_path / "document_ids.pkl"
             
             if faiss_file.exists() and ids_file.exists():
-                # Load FAISS index
                 self.faiss_index = faiss.read_index(str(faiss_file))
-                
-                # Load document IDs
                 with open(ids_file, 'rb') as f:
                     self.document_ids = pickle.load(f)
-                
-                logger.info(f"Đã load {self.faiss_index.ntotal} vectors từ disk")
-            
+                logger.info(f"Đã load {self.faiss_index.ntotal} vectors")
         except Exception as e:
             logger.error(f"Lỗi load database: {e}")
     
@@ -435,20 +388,15 @@ class VectorDatabase:
         """Lấy thống kê database"""
         try:
             cursor = self.metadata_db.cursor()
-            
-            # Count documents
             cursor.execute("SELECT COUNT(*) FROM documents")
             doc_count = cursor.fetchone()[0]
             
-            # Count images
             cursor.execute("SELECT COUNT(*) FROM images")
             img_count = cursor.fetchone()[0]
             
-            # Count searches
             cursor.execute("SELECT COUNT(*) FROM search_history")
             search_count = cursor.fetchone()[0]
             
-            # Average similarity
             cursor.execute("SELECT AVG(max_similarity) FROM search_history")
             avg_similarity = cursor.fetchone()[0] or 0
             
@@ -461,7 +409,6 @@ class VectorDatabase:
                 'vector_dimension': self.vector_dimension,
                 'similarity_threshold': self.similarity_threshold
             }
-            
         except Exception as e:
             logger.error(f"Lỗi lấy thống kê: {e}")
             return {}
