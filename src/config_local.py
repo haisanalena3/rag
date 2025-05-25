@@ -11,8 +11,8 @@ def load_config_local():
         # Cấu hình cho Local Gemma
         "USE_LOCAL_MODEL": True,
         "LOCAL_MODEL": {
-            "base_url": "http://localhost:11434",
-            "model": "gemma3:1b-it-qat",  # Có thể thay bằng gemma3:1b hoặc gemma3:8b
+            "base_url": "https://ktool.thangnotes.dev",
+            "model": "gemma3:4b",  # Có thể thay bằng gemma3:1b hoặc gemma3:8b
             "max_tokens": 2000,
             "temperature": 0.3,
             "top_p": 0.4,
