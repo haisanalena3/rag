@@ -11,3 +11,10 @@ faiss-cpu
 aiofiles
 torch==2.6.0
 spacy
+mcp==1.9.1
+fastapi
+uvicorn
+fastmcp
+sseclient
+sseclient-py
+nest_asyncio

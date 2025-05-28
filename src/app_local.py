@@ -12,26 +12,26 @@ import logging
 import time
 import shutil
 import requests
-
-try:
-    import torch
-    if not hasattr(torch.classes, '__path__'):
-        torch.classes.__path__ = [os.path.join(torch.__path__[0], 'classes')]
-except ImportError:
-    pass
-except Exception as e:
-    print(f"Warning: Could not fix torch.classes path: {e}")
+import hashlib
+from datetime import datetime
+import asyncio
+import nest_asyncio
 
 from config_local import load_config_local
 from rag_local import (
     load_documents, search_documents, ask_local_model,
     search_documents_with_threshold, adaptive_threshold_search,
-    enhanced_search_with_metadata
+    enhanced_search_with_metadata, get_vector_database
 )
 from collect_local import WebScraperLocal
+from text_collector import TextContentCollector
 from local_gemma import LocalGemmaClient
+from mcp_client import MCPClient
 
-logging.basicConfig(level=logging.INFO)
+# Áp dụng nest_asyncio để hỗ trợ asyncio trong Streamlit
+nest_asyncio.apply()
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 def validate_query_input(question, config):
@@ -221,11 +221,11 @@ def get_available_models():
         if available_models:
             return available_models
         else:
-            return ["gemma3:4b"]  # Default fallback
+            return ["qwen2.5:3b"]
             
     except Exception as e:
         logger.error(f"Lỗi lấy danh sách models: {e}")
-        return ["gemma3:4b"]  # Default fallback
+        return ["qwen2.5:3b"]
 
 def display_database_debug_info(rag_system):
     """Hiển thị thông tin debug chi tiết về database"""
@@ -287,12 +287,10 @@ def get_server_info(config, selected_model=None):
         server_info['response_time'] = response_time
         
         if connection_status:
-            # Lấy danh sách models có sẵn
             available_models = local_client.get_available_models()
             server_info['available_models'] = available_models
             server_info['status'] = 'Connected'
             
-            # Kiểm tra model hiện tại có tồn tại không
             if selected_model and not any(selected_model in model for model in available_models):
                 server_info['status'] = f'Model {selected_model} not found'
         else:
@@ -372,14 +370,20 @@ def log_api_request(status, duration, error=None, prompt_details=None):
     
     st.session_state.api_requests.append(request_log)
     
-    # Giữ tối đa 20 requests
     if len(st.session_state.api_requests) > 20:
         st.session_state.api_requests = st.session_state.api_requests[-20:]
+
+def serialize_mcp_result(obj):
+    """Chuyển đổi TextContent hoặc các đối tượng không JSON-serializable thành chuỗi"""
+    if hasattr(obj, 'text'):
+        return str(obj.text)
+    elif hasattr(obj, '__str__'):
+        return str(obj)
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
 
 def display_prompt_details(question, context, model_config, response=None, duration=None):
     """Hiển thị chi tiết prompt được gửi lên model"""
     with st.expander("🔍 Chi tiết Prompt & Request", expanded=False):
-        # Tab layout for better organization
         tab1, tab2, tab3, tab4 = st.tabs(["📤 Request", "📝 Prompt", "⚙️ Config", "📥 Response"])
         
         with tab1:
@@ -410,10 +414,9 @@ def display_prompt_details(question, context, model_config, response=None, durat
         
         with tab2:
             st.subheader("Full Prompt Sent to Model")
-            # Reconstruct the exact prompt sent to model
             full_prompt = create_intelligent_multimodal_context(
                 context.replace(model_config['system_prompt'], '').strip(),
-                [], # Images will be shown separately
+                [],
                 question,
                 model_config['system_prompt']
             )
@@ -427,7 +430,6 @@ def display_prompt_details(question, context, model_config, response=None, durat
             st.write("**📚 Context Provided:**")
             context_only = context.replace(model_config['system_prompt'], '').strip()
             if context_only:
-                # Truncate very long context for display
                 if len(context_only) > 2000:
                     st.code(context_only[:2000] + "\n\n... (truncated)", language="text")
                     st.caption(f"Full context: {len(context_only)} characters")
@@ -445,7 +447,6 @@ def display_prompt_details(question, context, model_config, response=None, durat
         
         with tab3:
             st.subheader("Model Configuration")
-            # Display as JSON for easy copying
             config_dict = {
                 "model": model_config['selected_model'],
                 "max_tokens": model_config['max_tokens'],
@@ -458,7 +459,6 @@ def display_prompt_details(question, context, model_config, response=None, durat
             st.write("**JSON Configuration:**")
             st.code(json.dumps(config_dict, indent=2), language="json")
             
-            # Equivalent API call
             st.write("**Equivalent API Call:**")
             config = load_config_local()
             api_call = f"""curl -X POST "{config['LOCAL_MODEL']['base_url']}/api/generate" \\
@@ -484,14 +484,13 @@ def display_prompt_details(question, context, model_config, response=None, durat
                     st.write("**📈 Response Metrics:**")
                     st.write(f"- **Length:** {len(response)} characters")
                     st.write(f"- **Words:** {len(response.split())}")
-                    st.write(f"- **Lines:** {len(response.split(chr(10)))}")
+                    st.write(f"- **Lines:** {len(response.split('\n'))}")
                     if duration:
                         words_per_sec = len(response.split()) / duration if duration > 0 else 0
                         st.write(f"- **Speed:** {words_per_sec:.1f} words/sec")
                 
                 with col2:
                     st.write("**🎯 Response Quality:**")
-                    # Simple quality metrics
                     has_vietnamese = bool(re.search(r'[àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]', response))
                     has_structure = bool(re.search(r'(\n\n|\d+\.|•|-)', response))
                     has_images = bool(re.search(r'\[IMAGE_\d+\]', response))
@@ -509,21 +508,16 @@ def create_sidebar():
     """Tạo sidebar với các chức năng điều khiển"""
     st.sidebar.title("🔧 Điều khiển hệ thống")
     
-    # Model Selection - Đặt ở đầu sidebar
     st.sidebar.header("🤖 Chọn Model")
     
-    # Lấy danh sách models có sẵn
     available_models = get_available_models()
     
-    # Load default config
     config = load_config_local()
-    default_model = config.get('LOCAL_MODEL', {}).get('model', 'gemma3:4b')
+    default_model = config.get('LOCAL_MODEL', {}).get('model', 'qwen2.5:3b')
     
-    # Đảm bảo default model có trong danh sách
     if default_model not in available_models:
         available_models.insert(0, default_model)
     
-    # Model selection dropdown
     selected_model = st.sidebar.selectbox(
         "Chọn Model:",
         options=available_models,
@@ -532,9 +526,7 @@ def create_sidebar():
         key="model_selector"
     )
     
-    # Hiển thị thông tin về model được chọn
     if selected_model:
-        # Kiểm tra model có tồn tại không
         try:
             local_client = LocalGemmaClient(
                 base_url=config['LOCAL_MODEL']['base_url'],
@@ -547,7 +539,6 @@ def create_sidebar():
             else:
                 st.sidebar.error(f"❌ Model {selected_model} không tồn tại")
                 
-                # Nút để tải model
                 if st.sidebar.button(f"📥 Tải model {selected_model}", key="download_model"):
                     with st.sidebar.spinner(f"Đang tải {selected_model}..."):
                         success = local_client.pull_model(selected_model)
@@ -560,15 +551,11 @@ def create_sidebar():
         except Exception as e:
             st.sidebar.error(f"❌ Lỗi kiểm tra model: {e}")
     
-    # Server info với model được chọn
     display_server_info(selected_model)
     
-    # API Monitor
     display_api_monitor()
     
-    # Model Configuration với expander
     with st.sidebar.expander("⚙️ Cấu hình Model", expanded=False):
-        # Model parameters
         max_tokens = st.slider(
             "Max Tokens:",
             min_value=100,
@@ -609,21 +596,18 @@ def create_sidebar():
             key="timeout_slider"
         )
         
-        # Streaming option
         enable_streaming = st.checkbox(
             "🌊 Bật Streaming",
             value=True,
             help="Hiển thị response theo thời gian thực"
         )
         
-        # Debug options
         show_prompt_details = st.checkbox(
             "🔍 Hiển thị chi tiết Prompt",
             value=True,
             help="Hiển thị prompt đầy đủ được gửi lên model"
         )
     
-    # System Prompt Configuration với expander
     with st.sidebar.expander("📝 System Prompt", expanded=False):
         default_system_prompt = """"""
         
@@ -635,7 +619,6 @@ def create_sidebar():
             key="system_prompt_textarea"
         )
         
-        # Preset prompts
         st.write("**Prompt Templates:**")
         if st.button("📚 Academic", key="academic_prompt"):
             st.session_state.system_prompt_textarea = """Bạn là một trợ lý học thuật chuyên nghiệp. Hãy trả lời với phong cách học thuật, có trích dẫn và phân tích sâu."""
@@ -649,7 +632,6 @@ def create_sidebar():
             st.session_state.system_prompt_textarea = """Bạn là một giảng viên. Hãy giải thích từng bước một cách dễ hiểu, có ví dụ cụ thể."""
             st.rerun()
     
-    # Search Configuration với expander
     with st.sidebar.expander("🔍 Cấu hình Tìm kiếm", expanded=False):
         search_threshold = st.slider(
             "Ngưỡng tìm kiếm:",
@@ -681,40 +663,83 @@ def create_sidebar():
             help="Sử dụng AI khi không tìm thấy kết quả"
         )
     
-    # Data Collection với expander
     with st.sidebar.expander("📥 Thu thập dữ liệu", expanded=False):
+        st.write("**Thu thập từ URL**")
         new_url = st.text_input(
             "Nhập URL cần thu thập:",
             placeholder="https://example.com/article",
             key="new_url_input"
         )
         
-        col1, col2 = st.columns(2)
+        st.write("**Nhập nội dung văn bản**")
+        new_text = st.text_area(
+            "Nhập nội dung để thêm vào database:",
+            placeholder="Nhập văn bản tại đây...",
+            height=150,
+            key="new_text_input"
+        )
+        
+        col1, col2, col3 = st.columns(3)
         with col1:
-            if st.button("🚀 Thu thập", key="collect_single", type="primary"):
+            if st.button("🚀 Thu thập URL", key="collect_single", type="primary"):
                 if new_url:
                     collect_single_url(new_url)
                 else:
                     st.error("Vui lòng nhập URL")
         
         with col2:
+            if st.button("💾 Lưu nội dung", key="save_text"):
+                if new_text.strip():
+                    text_collector = TextContentCollector()
+                    success = text_collector.save_text_content(new_text)
+                    if success:
+                        st.success("✅ Đã lưu nội dung vào database")
+                        if 'rag_system' in st.session_state:
+                            st.session_state.rag_system.load_multimodal_data()
+                        st.rerun()
+                    else:
+                        st.error("❌ Không thể lưu nội dung")
+                else:
+                    st.error("Vui lòng nhập nội dung")
+        
+        with col3:
             if st.button("🗑️ Xóa DB", key="clear_db"):
                 clear_database()
     
-    # Debug Information với expander
-    with st.sidebar.expander("🐛 Debug Info", expanded=False):
-        if st.button("📊 Hiển thị Stats", key="show_stats"):
-            st.session_state.show_debug = True
+    with st.sidebar.expander("🌐 Cấu hình MCP Server", expanded=False):
+        mcp_config = config.get('MCP', {})
         
-        if st.button("🔄 Reload Config", key="reload_config"):
-            st.cache_data.clear()
-            st.success("Config reloaded!")
+        mcp_sse_url = st.text_input(
+            "MCP SSE URL:",
+            value=mcp_config.get('sse_url', 'http://localhost:8081/sse'),
+            key="mcp_sse_url_input"
+        )
         
-        st.write("**Session State Keys:**")
-        for key in list(st.session_state.keys())[:5]:
-            st.caption(f"- {key}")
-    
-    # Return config for use in main app
+        mcp_timeout = st.slider(
+            "Timeout (seconds):",
+            min_value=10,
+            max_value=120,
+            value=mcp_config.get('timeout', 30),
+            step=10,
+            key="mcp_timeout_slider"
+        )
+        
+        if st.button("🔍 Kiểm tra kết nối MCP", key="test_mcp_connection"):
+            with st.spinner("Đang kiểm tra kết nối..."):
+                mcp_client = MCPClient(mcp_sse_url, mcp_timeout)
+                try:
+                    success, message = asyncio.run(mcp_client.test_connection())
+                    if success:
+                        st.success(f"✅ {message}")
+                        st.session_state.mcp_client = mcp_client
+                    else:
+                        st.error(f"❌ {message}")
+                except Exception as e:
+                    st.error(f"❌ Lỗi kết nối: {str(e)}")
+                finally:
+                    if 'mcp_client' in locals() and mcp_client != st.session_state.get('mcp_client'):
+                        mcp_client.close()
+
     return {
         'selected_model': selected_model,
         'max_tokens': max_tokens,
@@ -727,7 +752,11 @@ def create_sidebar():
         'max_results': max_results,
         'max_images': max_images,
         'enable_fallback': enable_fallback,
-        'show_prompt_details': show_prompt_details
+        'show_prompt_details': show_prompt_details,
+        'mcp_config': {
+            'sse_url': mcp_sse_url,
+            'timeout': mcp_timeout
+        }
     }
 
 def collect_single_url(url):
@@ -773,7 +802,7 @@ def handle_no_results_fallback(question, model_config):
     if not model_config.get('enable_fallback', True):
         return "Không tìm thấy thông tin liên quan và AI fallback đã bị tắt."
     
-    st.info("🔍 Không tìm thấy thông tin liên quan trong database. Đang gọi AI để trả lời...")
+    st.info("🔍 Không tìm thấy thông tin liên quan trong database hoặc MCP. Đang gọi AI để trả lời...")
     
     fallback_context = f"""
 {model_config['system_prompt']}
@@ -782,11 +811,10 @@ def handle_no_results_fallback(question, model_config):
 """
     
     try:
-        # Create temporary config with custom parameters
         config = load_config_local()
         temp_config = config.copy()
         temp_config['LOCAL_MODEL'].update({
-            'model': model_config['selected_model'],  # Sử dụng model được chọn
+            'model': model_config['selected_model'],
             'max_tokens': model_config['max_tokens'],
             'temperature': model_config['temperature'],
             'top_p': model_config['top_p'],
@@ -802,7 +830,6 @@ def handle_no_results_fallback(question, model_config):
         
         duration = time.time() - start_time
         
-        # Log request với prompt details
         prompt_details = {
             'type': 'fallback',
             'question': question,
@@ -813,7 +840,6 @@ def handle_no_results_fallback(question, model_config):
         
         log_api_request("Success (Fallback)", duration, prompt_details=prompt_details)
         
-        # Display prompt details if enabled
         if model_config.get('show_prompt_details', True):
             display_prompt_details(question, fallback_context, model_config, response, duration)
         
@@ -834,7 +860,6 @@ def ask_local_model_streaming(question, context, config):
             model=config["LOCAL_MODEL"]["model"]
         )
         
-        # Placeholder cho streaming - cần implement trong LocalGemmaClient
         response = local_client.generate_response(
             question,
             context,
@@ -938,7 +963,7 @@ def display_streaming_text(text):
     for char in text:
         displayed_text += char
         placeholder.markdown(displayed_text)
-        time.sleep(0.01)  # Điều chỉnh tốc độ streaming
+        time.sleep(0.01)
 
 def auto_embed_images_in_answer(answer, relevant_images, enable_streaming=False):
     """Tự động chèn ảnh vào câu trả lời"""
@@ -986,19 +1011,17 @@ def auto_embed_images_in_answer(answer, relevant_images, enable_streaming=False)
 def main():
     """Hàm chính của ứng dụng"""
     st.set_page_config(
-        page_title="RAG Local với Ảnh Chèn",
+        page_title="RAG Local với Ảnh Chèn & MCP SSE",
         page_icon="🤖",
         layout="wide",
         initial_sidebar_state="expanded"
     )
     
-    # Create sidebar and get model config
     model_config = create_sidebar()
     
-    st.title("🤖 Hệ thống RAG Local với Ảnh Chèn Thông Minh")
+    st.title("🤖 DEMO AI")
     st.markdown("---")
     
-    # Initialize RAG system
     if 'rag_system' not in st.session_state:
         with st.spinner("Đang khởi tạo hệ thống..."):
             st.session_state.rag_system = EnhancedMultimodalRAGLocal("db")
@@ -1011,30 +1034,31 @@ def main():
         col1, col2 = st.columns(2)
         with col1:
             st.info("💡 **Hướng dẫn sử dụng:**")
-            st.write("1. Sử dụng sidebar để thêm URL")
-            st.write("2. Nhấn 'Thu thập' để tải dữ liệu")
-            st.write("3. Đặt câu hỏi sau khi có dữ liệu")
+            st.write("1. Sử dụng sidebar để thêm URL hoặc nội dung văn bản")
+            st.write("2. Cấu hình MCP server qua SSE")
+            st.write("3. Nhấn 'Thu thập' hoặc 'Lưu nội dung' để tải dữ liệu")
+            st.write("4. Đặt câu hỏi sau khi có dữ liệu")
         
         with col2:
             st.info("🔧 **Tính năng:**")
             st.write("- Thu thập từ URL")
+            st.write("- Thêm nội dung văn bản trực tiếp")
             st.write("- Ảnh chèn thông minh")
             st.write("- AI trả lời mọi câu hỏi")
             st.write("- Cấu hình model linh hoạt")
             st.write("- Streaming response")
             st.write("- API monitoring")
-            st.write("- **Chi tiết Prompt debugging**")
-            st.write("- **🆕 Chọn model từ danh sách**")
+            st.write("- Chi tiết Prompt debugging")
+            st.write("- Chọn model từ danh sách")
+            st.write("- Kết nối MCP qua SSE")
     
     if rag_system.has_data:
         display_database_debug_info(rag_system)
     
     st.markdown("---")
     
-    # Main chat interface
-    st.header("💬 Hỏi đáp thông minh với AI")
+    st.header("💬 Hỏi đáp thông minh với AI & MCP")
     
-    # Hiển thị model hiện tại
     st.info(f"🤖 **Model hiện tại:** {model_config['selected_model']}")
     
     question = st.text_input(
@@ -1055,13 +1079,79 @@ def main():
             try:
                 start_time = time.time()
                 
-                st.info(f"🔍 Đang tìm kiếm: '{question}' với threshold {model_config['search_threshold']}")
+                enhanced_query = question
+                mcp_result = None
+                mcp_context = ""
+                if 'mcp_client' in st.session_state:
+                    mcp_client = st.session_state.mcp_client
+                    try:
+                        # Lấy prompt cho AI chọn tool
+                        tool_prompt, _ = asyncio.run(mcp_client.process_query(question))
+                        logger.info(f"MCP tool prompt: {tool_prompt}")
+                        if tool_prompt and not tool_prompt.startswith("Lỗi"):
+                            # Gửi prompt đến AI để chọn tool
+                            temp_config = config.copy()
+                            temp_config['LOCAL_MODEL'].update({
+                                'model': model_config['selected_model'],
+                                'max_tokens': model_config['max_tokens'],
+                                'temperature': model_config['temperature'],
+                                'top_p': model_config['top_p'],
+                                'timeout': model_config['timeout']
+                            })
+                            tool_selection = ask_local_model(tool_prompt, "", temp_config)
+                            logger.info(f"AI tool selection: {tool_selection}")
+                            
+                            try:
+                                tool_selection = tool_selection.replace('```json', '')
+                                tool_selection = tool_selection.replace('```', '')
+                                tool_info = json.loads(tool_selection)
+                                if tool_info and "tool_name" in tool_info:
+                                    # Gọi tool được AI chọn
+                                    tool_name = tool_info["tool_name"]
+                                    tool_params = tool_info.get("parameters", {})
+                                    mcp_result = asyncio.run(mcp_client.call_tool(tool_name, tool_params))
+                                    if mcp_result:
+                                        mcp_context = f"Kết quả từ công cụ {tool_name}: {json.dumps(mcp_result, ensure_ascii=False, default=serialize_mcp_result)}"
+                                        st.info(f"🔧 **Kết quả MCP Tool {tool_name}:** {mcp_result}")
+                                    else:
+                                        st.warning(f"⚠️ Công cụ {tool_name} {tool_selection} không trả về kết quả")
+                                
+                            except json.JSONDecodeError:
+                                logger.error(f"AI trả về định dạng JSON không hợp lệ: {tool_selection}")
+                                st.warning(f"⚠️ AI trả về lựa chọn công cụ không hợp lệ: {tool_selection}")
+                                # Fallback cho câu hỏi về bug
+                                if "bug" in question.lower():
+                                    tool_name = "totalBug"
+                                    target = question.split()[0].capitalize() if question.split() else "Unknown"
+                                    tool_params = {"member_name": target}
+                                    mcp_result = asyncio.run(mcp_client.call_tool(tool_name, tool_params))
+                                    if mcp_result:
+                                        mcp_context = f"Kết quả từ công cụ {tool_name}: {json.dumps(mcp_result, ensure_ascii=False, default=serialize_mcp_result)}"
+                                        st.info(f"🔧 **Kết quả MCP Tool {tool_name} (fallback):** {mcp_result}")
+                                    else:
+                                        st.warning(f"⚠️ Fallback công cụ {tool_name} không trả về kết quả")
+                        else:
+                            st.error(f"❌ Không thể tạo prompt cho MCP tool: {tool_prompt if tool_prompt else 'Không có prompt'}")
+                    except Exception as e:
+                        logger.warning(f"MCP tool processing failed: {e}")
+                        st.error(f"❌ Không thể xử lý MCP tool: {e}")
+                        # Fallback cho câu hỏi về bug
+                        if "bug" in question.lower() and 'mcp_client' in st.session_state:
+                            tool_name = "totalBug"
+                            target = question.split()[0].capitalize() if question.split() else "Unknown"
+                            tool_params = {"member_name": target}
+                            mcp_result = asyncio.run(mcp_client.call_tool(tool_name, tool_params))
+                            if mcp_result:
+                                mcp_context = f"Kết quả từ công cụ {tool_name}: {json.dumps(mcp_result, ensure_ascii=False, default=serialize_mcp_result)}"
+                                st.info(f"🔧 **Kết quả MCP Tool {tool_name} (fallback):** {mcp_result}")
+                            else:
+                                st.warning(f"⚠️ Fallback công cụ {tool_name} không trả về kết quả")
                 
+                # Tìm kiếm trong database với enhanced_query
                 relevant_docs, similarity = rag_system.enhanced_search_multimodal(
-                    question, model_config['search_threshold'], model_config['max_results']
+                    enhanced_query, model_config['search_threshold'], model_config['max_results']
                 )
                 
-                # Display search results
                 st.subheader("🔍 Kết quả tìm kiếm")
                 col1, col2, col3, col4 = st.columns(4)
                 with col1:
@@ -1082,7 +1172,7 @@ def main():
                             
                             snippet = doc['text_content'][:300] + "..."
                             highlighted_snippet = snippet
-                            for word in question.split():
+                            for word in enhanced_query.split():
                                 if len(word) > 3:
                                     highlighted_snippet = highlighted_snippet.replace(
                                         word, f"**{word}**"
@@ -1090,83 +1180,74 @@ def main():
                             
                             st.write(f"*Đoạn trích:* {highlighted_snippet}")
                             st.write("---")
-                    
-                    # Create context
-                    text_context = "\n\n".join([
+                
+                # Tích hợp kết quả MCP và database vào context
+                text_context = mcp_context
+                if relevant_docs:
+                    text_context += "\n\n" + "\n\n".join([
                         f"Tiêu đề: {doc['title']}\nMô tả: {doc['description']}\nNội dung: {doc['text_content'][:1000]}..."
                         for doc in relevant_docs
                     ])
-                    
-                    relevant_images = rag_system.get_relevant_images_for_context(
-                        relevant_docs, question, model_config['max_images']
-                    )
-                    
-                    context = create_intelligent_multimodal_context(
-                        text_context, relevant_images, question, model_config['system_prompt']
-                    )
-                    
-                    # Create temporary config with custom parameters
-                    temp_config = config.copy()
-                    temp_config['LOCAL_MODEL'].update({
-                        'model': model_config['selected_model'],  # Sử dụng model được chọn
-                        'max_tokens': model_config['max_tokens'],
-                        'temperature': model_config['temperature'],
-                        'top_p': model_config['top_p'],
-                        'timeout': model_config['timeout']
-                    })
-                    
-                    if model_config.get('enable_streaming', False):
-                        answer = ask_local_model_streaming(question, context, temp_config)
-                    else:
-                        answer = ask_local_model(question, context, temp_config)
-                    
-                    duration = time.time() - start_time
-                    
-                    # Log request với prompt details
-                    prompt_details = {
-                        'type': 'database_search',
-                        'question': question,
-                        'context_length': len(context),
-                        'system_prompt_length': len(model_config['system_prompt']),
-                        'documents_found': len(relevant_docs),
-                        'images_found': len(relevant_images),
-                        'model': model_config['selected_model']
-                    }
-                    
-                    log_api_request("Success", duration, prompt_details=prompt_details)
-                    
-                    st.subheader("📝 Câu trả lời:")
-                    st.success("✅ **Dựa trên database**")
-                    
-                    smart_display_answer_with_embedded_images(
-                        answer, relevant_images, model_config.get('enable_streaming', False)
-                    )
-                    
-                    # Display prompt details if enabled
-                    if model_config.get('show_prompt_details', True):
-                        display_prompt_details(question, context, model_config, answer, duration)
-                    
-                    if relevant_images:
-                        with st.expander("🖼️ Thông tin ảnh", expanded=False):
-                            for i, img_info in enumerate(relevant_images, 1):
-                                st.write(f"**Ảnh {i}:**")
-                                st.write(f"- Nguồn: {img_info['source_doc']['title']}")
-                                if img_info['alt']:
-                                    st.write(f"- Mô tả: {img_info['alt']}")
-                                if img_info['title']:
-                                    st.write(f"- Tiêu đề: {img_info['title']}")
-                                st.write(f"- Độ liên quan: {img_info['relevance_score']:.2f}")
-                                st.write("---")
                 
+                relevant_images = rag_system.get_relevant_images_for_context(
+                    relevant_docs, enhanced_query, model_config['max_images']
+                )
+                
+                context = create_intelligent_multimodal_context(
+                    text_context, relevant_images, question, model_config['system_prompt']
+                )
+                
+                temp_config = config.copy()
+                temp_config['LOCAL_MODEL'].update({
+                    'model': model_config['selected_model'],
+                    'max_tokens': model_config['max_tokens'],
+                    'temperature': model_config['temperature'],
+                    'top_p': model_config['top_p'],
+                    'timeout': model_config['timeout']
+                })
+                
+                if model_config.get('enable_streaming', False):
+                    answer = ask_local_model_streaming(question, context, temp_config)
                 else:
-                    st.subheader("📝 Câu trả lời:")
-                    fallback_answer = handle_no_results_fallback(question, model_config)
-                    
-                    if model_config.get('enable_streaming', False):
-                        display_streaming_text(fallback_answer)
-                    else:
-                        st.markdown(fallback_answer)
+                    answer = ask_local_model(question, context, temp_config)
                 
+                duration = time.time() - start_time
+                
+                prompt_details = {
+                    'type': 'database_search_with_mcp',
+                    'question': question,
+                    'context_length': len(context),
+                    'system_prompt_length': len(model_config['system_prompt']),
+                    'documents_found': len(relevant_docs),
+                    'images_found': len(relevant_images),
+                    'mcp_result': str(mcp_result) if mcp_result else None,
+                    'model': model_config['selected_model']
+                }
+                
+                log_api_request("Success", duration, prompt_details=prompt_details)
+                
+                st.subheader("📝 Câu trả lời:")
+                st.success("✅ **Dựa trên database và MCP**")
+                
+                smart_display_answer_with_embedded_images(
+                    answer, relevant_images, model_config.get('enable_streaming', False)
+                )
+                
+                if model_config.get('show_prompt_details', True):
+                    display_prompt_details(question, context, model_config, answer, duration)
+                
+                if relevant_images:
+                    with st.expander("🖼️ Thông tin ảnh", expanded=False):
+                        for i, img_info in enumerate(relevant_images, 1):
+                            st.write(f"**Ảnh {i}:**")
+                            st.write(f"- Nguồn: {img_info['source_doc']['title']}")
+                            if img_info['alt']:
+                                st.write(f"- Mô tả: {img_info['alt']}")
+                            if img_info['title']:
+                                st.write(f"- Tiêu đề: {img_info['title']}")
+                            st.write(f"- Độ liên quan: {img_info['relevance_score']:.2f}")
+                            st.write("---")
+            
             except Exception as e:
                 duration = time.time() - start_time if 'start_time' in locals() else 0
                 log_api_request("Error", duration, str(e))
@@ -1187,7 +1268,7 @@ def main():
                     st.error(f"❌ Không thể trả lời: {e2}")
     
     st.markdown("---")
-    st.markdown("🤖 **RAG Local System** - Trả lời dựa trên database hoặc kiến thức chung")
+    st.markdown("🤖 **RAG Local System với MCP SSE** - Trả lời dựa trên database, MCP, hoặc kiến thức chung")
 
 if __name__ == "__main__":
     main()

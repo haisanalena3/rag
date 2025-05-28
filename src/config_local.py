@@ -7,8 +7,6 @@ def load_config_local():
             "https://thangnotes.dev/2023/08/04/tai-file-pdf-bi-chan-tai-xuong-tren-drive-va-get-link-cac-video-tai-ve/",
             "https://thangnotes.dev/2023/05/25/1-1-thuc-hanh-cai-dat-database-oracle-19c-tren-ec2-aws/",
         ],
-
-        # Cấu hình cho Local Gemma
         "USE_LOCAL_MODEL": True,
         "LOCAL_MODEL": {
             "base_url": "https://ktool.thangnotes.dev",
@@ -18,8 +16,6 @@ def load_config_local():
             "top_p": 0.4,
             "timeout": 180
         },
-
-        # Vector Database Configuration
         "VECTOR_DB": {
             "enabled": False,
             "db_path": "vector_database",
@@ -30,25 +26,19 @@ def load_config_local():
             "index_type": "faiss",
             "distance_metric": "cosine"
         },
-
-        # Cấu hình database - Giữ threshold thấp để tìm được nhiều kết quả
         "DB_THRESHOLD": 0.3,
-        "MIN_SIMILARITY_THRESHOLD": 0.2,  # Threshold rất thấp
+        "MIN_SIMILARITY_THRESHOLD": 0.2,
         "MAX_SEARCH_RESULTS": 5,
         "MAX_IMAGES_PER_RESPONSE": 8,
-
-        # Cấu hình validation - TẮT strict validation
         "QUERY_VALIDATION": {
-            "min_query_length": 1,  # Giảm xuống 1
-            "max_query_length": 1000,  # Tăng lên
-            "enable_domain_check": False,  # TẮT domain check
-            "enable_relevance_check": False,  # TẮT relevance check
-            "enable_strict_mode": False,  # TẮT strict mode
-            "allow_general_questions": True,  # CHO PHÉP câu hỏi tổng quát
-            "fallback_to_ai": True  # Luôn fallback to AI
+            "min_query_length": 1,
+            "max_query_length": 1000,
+            "enable_domain_check": False,
+            "enable_relevance_check": False,
+            "enable_strict_mode": False,
+            "allow_general_questions": True,
+            "fallback_to_ai": True
         },
-
-        # Cấu hình scraping nâng cao
         "SCRAPING": {
             "timeout": 20,
             "max_retries": 3,
@@ -68,8 +58,6 @@ def load_config_local():
                 "Connection": "keep-alive"
             }
         },
-
-        # Advanced Search Configuration
         "SEARCH": {
             "enable_semantic_search": True,
             "enable_keyword_search": True,
@@ -82,5 +70,11 @@ def load_config_local():
             },
             "reranking_enabled": True,
             "query_expansion": True
+        },
+        # MCP Configuration for SSE
+        "MCP": {
+            "sse_url": "http://localhost:8081/sse",
+            "message_url": "http://localhost:8000/messages",
+            "timeout": 30
         }
     }

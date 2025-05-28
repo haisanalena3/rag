@@ -742,3 +742,4 @@ def search_documents(query, documents, top_k=3):
     """Tìm kiếm documents liên quan nhất với threshold thấp"""
     results, _ = enhanced_search_documents(query, documents, threshold=0.1, top_k=top_k)
     return results
+

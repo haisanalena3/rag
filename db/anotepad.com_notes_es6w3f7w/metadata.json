@@ -1,0 +1,57 @@
+{
+  "metadata": {
+    "url": "https://anotepad.com/notes/es6w3f7w",
+    "title": "aaa - Online Notepad",
+    "description": "aNotepad.com is your everyday online notepad. You can take notes and share notes online without having to login. You can use a rich text editor and download your note as PDF or Word document. Best of all - aNotepad is a fast, clean, and easy-to-use notepad online.",
+    "keywords": [],
+    "author": "",
+    "language": "en",
+    "scraped_at": "2025-05-27T23:32:35.115693",
+    "image_count": 2,
+    "scraper_version": "enhanced_v2.0",
+    "content_type": "general",
+    "word_count": 63,
+    "headings": [
+      "aaa",
+      "Select Your Language"
+    ],
+    "meta_tags": {},
+    "canonical_url": "",
+    "published_date": "",
+    "semantic_keywords": [
+      "online",
+      "select",
+      "notepad",
+      "your",
+      "language"
+    ]
+  },
+  "images": [
+    {
+      "url": "https://cdn.anotepad.com/images/badge_applestore.png?v=250503",
+      "local_path": "/Users/kuthang/Desktop/ai/rag/db/anotepad.com_notes_es6w3f7w/images/anotepad.com_notes_es6w3f7w_img_0_4e97ce0a8e.png",
+      "alt": "Download on the Apple Store",
+      "title": "",
+      "semantic_context": [],
+      "file_size": 3050,
+      "content_type": "image/png",
+      "filename": "anotepad.com_notes_es6w3f7w_img_0_4e97ce0a8e.png",
+      "hash": "4e97ce0a8e",
+      "width": 239,
+      "height": 80
+    },
+    {
+      "url": "https://cdn.anotepad.com/images/badge_playstore.png?v=250503",
+      "local_path": "/Users/kuthang/Desktop/ai/rag/db/anotepad.com_notes_es6w3f7w/images/anotepad.com_notes_es6w3f7w_img_1_d4ce4d823f.png",
+      "alt": "Get it on Google Play",
+      "title": "",
+      "semantic_context": [],
+      "file_size": 3709,
+      "content_type": "image/png",
+      "filename": "anotepad.com_notes_es6w3f7w_img_1_d4ce4d823f.png",
+      "hash": "d4ce4d823f",
+      "width": 270,
+      "height": 80
+    }
+  ]
+}

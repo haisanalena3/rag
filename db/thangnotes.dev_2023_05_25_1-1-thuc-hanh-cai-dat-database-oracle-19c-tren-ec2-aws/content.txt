@@ -1,0 +1,77 @@
+## Related Posts
+## [practice] Oracle Database Administration I 1Z0-082
+## Oracle Database Administration I 1Z0-082 exam
+## 10: Kiến trúc Multitenant trong Oracle
+## 9: Flashback query database
+## 8: Undo và Redo trong Oracle
+## 7: Tablespace trong Oracle Database
+HomeOracle Database Administration1.1: [thực hành] Cài đặt Database oracle 19c trên ec2 (aws)
+HomeOracle Database Administration1.1: [thực hành] Cài đặt Database oracle 19c trên ec2 (aws)
+1.1: [thực hành] Cài đặt Database oracle 19c trên ec2 (aws)
+xming dùng để mở giao diện qua ssh downloadtại đây
+Sau khi cài đặt putty và Xming xong thì tìm kiếm Xlaunch và setting theo mặc định như sau
+Vậy là việc cài đặt phần mềm cần thiết hoàn tất.
+Tiếp theo chúng ta tạo 1 máy chủ oracle linux 7 trên ec2 ở đây mình sẽ hướng dẫn cài trên oracle linux 7 và trên aws linux 2 phiên bản free tier eligible
+I. Cài đặt oracle 19c trên oracle linux 7
+I. Cài đặt oracle 19c trên oracle linux 7
+1: đăng nhập aws vào phần ec2 và tạo 1 ec2 mới, chọn Browse more AMIs để tìm kiếm 1 AMI oracle linux 7
+Tìm kiếm 1 AMI mới ở đây mình chọn 1 image linux 7 free như hình
+để việc cài đặt được mượt mà thì chúng ta nên chọn cấu hình có ram 4gb ở đây mình chọn cấu hình 2 vCPU và 4GB ram và ổ đĩa Volumes 100gb
+Sau khi tạo xong chúng ta ssh vào ec2 với user ec2-user và key pem đã download về lúc khởi tạo để mở cho phép ssh bằng password như sau:
++ setting password ec2-user:sudo passwdsau đó nhập password mới cho user ec2-user
++ Cho phép ssh bằng password mở filesshd_configsudo vi /etc/ssh/sshd_configvà setting như hình
++ lưu lại cấu hình và restart lại SSH serviceservice sshd restart
+Bước 2 cài đặt ORACLE DATABASE 19c
+1: cài đặt 1 số package cần thiết
+sudo yum install vim wget -y
+cài đặt package re oracle 19c
+yum install -y oracle-database-preinstall-19c
++sau khi cài đặt xong tạo các thư mục oracle home
+chown -R oracle:oinstall /u01
++ đổi password user oracle
+sudo passwd oraclesau đó nhập password mới của bạn
+2: download oracle 19c trên trang chủ hoặc download tại đây bạn có thể download bên ngoài bằng trình duyệt sau đó copy link download để thực hiện download trên server nếu download từ trang chủ
+3. cấu hình ORACLE_HOME
+mở file.bashrcbằng lệnhsudo vi .bashrcsau đó thêm path như hình
+lưu lại và sau đó chạy lệnhsource ~/.bashrcđể áp dụng path cho toàn hệ thống.
+logout và ssh lại kiểm tra xem path ORACLE_HOME đã được cài đặt chưa bằng lệnh echo $ORACLE_HOME nếu hiển thị/u01/app/oracle/product/19/db_1thành công.!
+sau khi cài đặt xong ORACLE_HOME tiến hành giải nén file cài đặt đã download trước đó
+sau khi giải nén xong tiến hành thoát ssh và mở lại putty
+chọn Auth => X11 và điền các thông số như hình
+open và login bằng user oracle
+mở thư mục oracle home vừa giải nén cd $ORACLE_HOME
+chạy ./runInstaller giao diện cài đặt sẽ được hiển thị
+Chọn Sever class và ấn next
+Chọn Enterprise Edition và ấn next
+Để mặc định và ấn next
+Cấu hình dung lượng SGA và PGA ở đây mình để Auto. Tiếp tục ấn vào mụcSample Schematích chọnInstall sample schemas in the database
+Ở bước cuối bạn mở thêm 1 terminal ssh vào bằng user có quyền root (ở đây mình dùng ec2-user ) sau đó chạy 2 file/u01/app/oraInventory/orainstRoot.shvà/u01/app/oracle/product/19/db_1/root.shnhư hệ thống cảnh báo sau đó ấn OK và đợi database Install.
+II. Cài đặt trên amazon linux 2
+II. Cài đặt trên amazon linux 2
+chọn phiên bản miễn phí của ec2 như hình và chọn ổ đĩa bạn điền 100gb
+2: ssh vào hệ thống với quyền root:sudo su
+4: chạy file installoracle.sh bằng lệnh:sh installoracle.shhệ thống sẽ báo bạn nhập public ip và password của user oracle mà bạn muốn đặt
+5: sau khi chạy xong thoát ssh và bật lại login với user oracle và kiểm tra xem path đã được config thành công chưa bằng lệnh:echo $ORACLE_HOMEnếu chưa có thì chạy lệnhsource /home/oracle/.bash_profile;
+6: chạy lệnhcd $ORACLE_HOMEtải oracle 19c và cài đặt như bình thường
+7. chọn bộ nhớ SGA như hình
+nếu bước cuối có lỗi thì bạn retry lại cài đặt.
+Related PostsOracle Database Administration[practice] Oracle Database Administration I 1Z0-082admin·18/09/2023·0 CommentOracle Database AdministrationOracle Database Administration I 1Z0-082 examadmin·15/09/2023·0 CommentOracle Database Administration10: Kiến trúc Multitenant trong Oracleadmin·19/06/2023·0 CommentKiến trúc Multitenant  trong Oracle Database: là một khái niệm giúp tối ưu hóa việc quản lý và sử dụng nhiều CSDL độc lập trên một hệ…Oracle Database Administration9: Flashback query databaseadmin·24/05/2023·0 CommentFlashback query: Là một tính năng trong cơ sở dữ liệu Oracle Database cho phép truy vẫn dữ liệu trong quá khứ. Nó cho phép bạn xem…Oracle Database Administration8: Undo và Redo trong Oracleadmin·23/05/2023·0 CommentUndo và Redo:  là 2 thành phần quan trọng phục vụ cho việc phục hồi dữ liệu trong Oracle Database. I: Undo Undo là 1 khái niệm…Oracle Database Administration7: Tablespace trong Oracle Databaseadmin·23/05/2023·0 CommentTablespace:  Là một không gian lưu trữ vật lý được cung cấp để tổ chức và quản lý các đối tượng cơ sở dữ liệu như table,…
+Oracle Database Administration[practice] Oracle Database Administration I 1Z0-082admin·18/09/2023·0 CommentOracle Database AdministrationOracle Database Administration I 1Z0-082 examadmin·15/09/2023·0 CommentOracle Database Administration10: Kiến trúc Multitenant trong Oracleadmin·19/06/2023·0 CommentKiến trúc Multitenant  trong Oracle Database: là một khái niệm giúp tối ưu hóa việc quản lý và sử dụng nhiều CSDL độc lập trên một hệ…Oracle Database Administration9: Flashback query databaseadmin·24/05/2023·0 CommentFlashback query: Là một tính năng trong cơ sở dữ liệu Oracle Database cho phép truy vẫn dữ liệu trong quá khứ. Nó cho phép bạn xem…Oracle Database Administration8: Undo và Redo trong Oracleadmin·23/05/2023·0 CommentUndo và Redo:  là 2 thành phần quan trọng phục vụ cho việc phục hồi dữ liệu trong Oracle Database. I: Undo Undo là 1 khái niệm…Oracle Database Administration7: Tablespace trong Oracle Databaseadmin·23/05/2023·0 CommentTablespace:  Là một không gian lưu trữ vật lý được cung cấp để tổ chức và quản lý các đối tượng cơ sở dữ liệu như table,…
+Oracle Database Administration[practice] Oracle Database Administration I 1Z0-082admin·18/09/2023·0 Comment
+Oracle Database AdministrationOracle Database Administration I 1Z0-082 examadmin·15/09/2023·0 Comment
+Oracle Database Administration10: Kiến trúc Multitenant trong Oracleadmin·19/06/2023·0 CommentKiến trúc Multitenant  trong Oracle Database: là một khái niệm giúp tối ưu hóa việc quản lý và sử dụng nhiều CSDL độc lập trên một hệ…
+Kiến trúc Multitenant  trong Oracle Database: là một khái niệm giúp tối ưu hóa việc quản lý và sử dụng nhiều CSDL độc lập trên một hệ…
+Kiến trúc Multitenant  trong Oracle Database: là một khái niệm giúp tối ưu hóa việc quản lý và sử dụng nhiều CSDL độc lập trên một hệ…
+Oracle Database Administration9: Flashback query databaseadmin·24/05/2023·0 CommentFlashback query: Là một tính năng trong cơ sở dữ liệu Oracle Database cho phép truy vẫn dữ liệu trong quá khứ. Nó cho phép bạn xem…
+Flashback query: Là một tính năng trong cơ sở dữ liệu Oracle Database cho phép truy vẫn dữ liệu trong quá khứ. Nó cho phép bạn xem…
+Flashback query: Là một tính năng trong cơ sở dữ liệu Oracle Database cho phép truy vẫn dữ liệu trong quá khứ. Nó cho phép bạn xem…
+Oracle Database Administration8: Undo và Redo trong Oracleadmin·23/05/2023·0 CommentUndo và Redo:  là 2 thành phần quan trọng phục vụ cho việc phục hồi dữ liệu trong Oracle Database. I: Undo Undo là 1 khái niệm…
+Undo và Redo:  là 2 thành phần quan trọng phục vụ cho việc phục hồi dữ liệu trong Oracle Database. I: Undo Undo là 1 khái niệm…
+Undo và Redo:  là 2 thành phần quan trọng phục vụ cho việc phục hồi dữ liệu trong Oracle Database. I: Undo Undo là 1 khái niệm…
+Oracle Database Administration7: Tablespace trong Oracle Databaseadmin·23/05/2023·0 CommentTablespace:  Là một không gian lưu trữ vật lý được cung cấp để tổ chức và quản lý các đối tượng cơ sở dữ liệu như table,…
+Tablespace:  Là một không gian lưu trữ vật lý được cung cấp để tổ chức và quản lý các đối tượng cơ sở dữ liệu như table,…
+Tablespace:  Là một không gian lưu trữ vật lý được cung cấp để tổ chức và quản lý các đối tượng cơ sở dữ liệu như table,…
+51voteArticle RatingSubscribe0CommentsInline FeedbacksView all comments
+Subscribe0CommentsInline FeedbacksView all comments
+0CommentsInline FeedbacksView all comments
+Inline FeedbacksView all comments
